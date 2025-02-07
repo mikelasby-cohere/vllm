@@ -1,0 +1,35 @@
+# try to build below
+DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai/v2 --build-arg max_jobs=8 --build-arg nvcc_threads=2 --build-arg torch_cuda_arch_list=""
+
+# ruler docker container
+docker run \
+    -p 5000:5000 \
+    --ipc=host \
+    --tty \
+    --interactive \
+    --entrypoint bash \
+    --detach \
+    cphsieh/ruler:0.2.0
+    bash
+
+# docker create container to inspect
+docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --ipc=host \
+    --tty \
+    --interactive \
+    --entrypoint bash \
+    --detach \
+    vllm/vllm-openai:latest
+
+# launch server
+docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai:latest \
+    --model Qwen/Qwen2.5-7B-Instruct-1M \
+    --enforce-eager
+
+48 mins to build
