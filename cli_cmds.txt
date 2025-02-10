@@ -1,5 +1,5 @@
 # try to build below
-DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai/v2 --build-arg max_jobs=8 --build-arg nvcc_threads=2 --build-arg torch_cuda_arch_list=""
+DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai --build-arg max_jobs=8 --build-arg nvcc_threads=2 --build-arg torch_cuda_arch_list=""
 
 # docker create container to inspect
 docker run --runtime nvidia --gpus all \
@@ -24,5 +24,5 @@ docker run --runtime nvidia --gpus all \
 48 mins to build
 
 # launch 7b server
-python ./serve_vllm_ruler.py Qwen/Qwen2.5-7B-Instruct-1M --enforce-eager
-python ./serve_vllm_ruler.py Qwen/Qwen2.5-14B-Instruct-1M --tensor-parallel-size 2 --enforce-eager
+python ./serve_vllm_ruler.py --model Qwen/Qwen2.5-7B-Instruct-1M --enforce-eager
+python ./serve_vllm_ruler.py --model Qwen/Qwen2.5-14B-Instruct-1M --tensor-parallel-size 4 --enforce-eager
