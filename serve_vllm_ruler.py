@@ -84,7 +84,43 @@ async def generate(request: Request) -> Response:
     return JSONResponse(ret)
 
 
+async def main():
+# def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument("--ssl-keyfile", type=str, default=None)
+    parser.add_argument("--ssl-certfile", type=str, default=None)
+    parser.add_argument(
+        "--root-path",
+        type=str,
+        default=None,
+        help="FastAPI root_path when app is behind a path based routing proxy")
+    parser = AsyncEngineArgs.add_cli_args(parser)
+    args = parser.parse_args()
+
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
+
+    config = await engine.get_model_config()
+    import pdb
+    breakpoint()
+    print(f"Model config:\n{config.__dict__}")
+    exit()
+
+    app.root_path = args.root_path
+    uvicorn.run(app,
+                host=args.host,
+                port=args.port,
+                log_level="debug",
+                timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+                ssl_keyfile=args.ssl_keyfile,
+                ssl_certfile=args.ssl_certfile)
+    
+
+
 if __name__ == "__main__":
+    # main()
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)

@@ -288,6 +288,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         self.sparse_attention_last_q = dual_chunk_attention_config.get(
             "sparse_attention_last_q", 64)
         self.dual_chunk_attention_config = dual_chunk_attention_config
+        # print(f"Dual chunk attention sub-config!]n{self.dual_chunk_attention_config}")
 
         prefixes = prefix.split(".")
         self.layer_idx = int(prefixes[prefixes.index("layers") + 1])
@@ -600,6 +601,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     heads_slash_size=heads_slash_size,
                     group_size=group_size)
             else:
+                raise RuntimeError("Using dense attention!")
                 for head_id in range(current_q.size(-2)):
                     # (seq_len, num_heads, head_size)
                     current_q_head = current_q[:, head_id, :].unsqueeze(1)
@@ -634,7 +636,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         chunk_size,
                         local_size,
                         current_orig_seq_lens,
-                        scaling_factor.item(),
+                        scaling_factor[i].item(),
                         ke - ks,
                         sparse_attn_enabled=sparse_attn_enabled,
                     )

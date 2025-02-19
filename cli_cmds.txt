@@ -26,3 +26,14 @@ docker run --runtime nvidia --gpus all \
 # launch 7b server
 python ./serve_vllm_ruler.py --model Qwen/Qwen2.5-7B-Instruct-1M --enforce-eager
 python ./serve_vllm_ruler.py --model Qwen/Qwen2.5-14B-Instruct-1M --tensor-parallel-size 4 --enforce-eager
+
+VLLM_ATTENTION_BACKEND=DUAL_CHUNK_FLASH_ATTN VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 python ./serve_vllm_ruler.py --model Qwen/Qwen2.5-7B-Instruct-1M --enforce-eager --enable-chunked-prefill
+VLLM_ATTENTION_BACKEND=DUAL_CHUNK_FLASH_ATTN VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 python ./serve_vllm_ruler.py --model Qwen/Qwen2.5-14B-Instruct-1M --tensor-parallel-size 4 --enforce-eager --enable-chunked-prefill
+VLLM_ATTENTION_BACKEND=DUAL_CHUNK_FLASH_ATTN VLLM_ALLOW_LONG_MAX_MODEL_LEN=1  \
+    python ./serve_vllm_ruler.py --model Qwen/Qwen2.5-14B-Instruct-1M \
+    --tensor-parallel-size 4 --enforce-eager --enable-chunked-prefill \
+    --hf-overrides '{"dual_chunk_attention_config": {"chunk_size": 262144, "local_size": 8192, "original_max_position_embeddings": 262144, "sparse_attention_threshold": 8191, "sparse_attention_last_q": 64}}'
+
+
+original sparse_attention_threshold = 32768
+conditional is > so -1 from desired sparse trigger point
