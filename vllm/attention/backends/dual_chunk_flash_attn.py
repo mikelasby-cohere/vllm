@@ -601,7 +601,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     heads_slash_size=heads_slash_size,
                     group_size=group_size)
             else:
-                raise RuntimeError("Using dense attention!")
+                # raise RuntimeError("Using dense attention!")
                 for head_id in range(current_q.size(-2)):
                     # (seq_len, num_heads, head_size)
                     current_q_head = current_q[:, head_id, :].unsqueeze(1)
@@ -785,7 +785,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 qk = F.softmax(qk, dim=-1, dtype=torch.float32)
 
                 vertical = qk.sum(-2, keepdim=True)
-                vertical[..., :30] = torch.inf
+                vertical[..., :30] = torch.inf  # TODO: keep at least 30 vertical indices?
 
                 int32_max = 2147483647  # avoid sort
                 int32_min = -2147483648
