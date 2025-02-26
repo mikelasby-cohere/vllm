@@ -1,5 +1,5 @@
-"""Attention layer with Dual chunk flash attention and sparse attention.
-"""
+"""Attention layer with Dual chunk flash attention and sparse attention."""
+
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
@@ -10,13 +10,18 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.backends.flash_attn import (FlashAttentionBackend,
-                                                FlashAttentionImpl,
-                                                FlashAttentionMetadata,
-                                                FlashAttentionMetadataBuilder)
+from vllm.attention.backends.flash_attn import (
+    FlashAttentionBackend,
+    FlashAttentionImpl,
+    FlashAttentionMetadata,
+    FlashAttentionMetadataBuilder,
+)
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                  flash_attn_with_kvcache, sparse_attn_func)
+from vllm.vllm_flash_attn import (
+    flash_attn_varlen_func,
+    flash_attn_with_kvcache,
+    sparse_attn_func,
+)
 
 
 class DualChunkFlashAttentionBackend(FlashAttentionBackend):
@@ -79,8 +84,7 @@ class DualChunkFlashAttentionMetadata(FlashAttentionMetadata):
     # Max sequence length for inter attention.
     max_seq_len_inter: Optional[int] = None
 
-    _cached_prefill_metadata: Optional[
-        "DualChunkFlashAttentionMetadata"] = None
+    _cached_prefill_metadata: Optional["DualChunkFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["DualChunkFlashAttentionMetadata"] = None
 
     @property
@@ -96,14 +100,19 @@ class DualChunkFlashAttentionMetadata(FlashAttentionMetadata):
             return None
 
         prefill_metadata = DualChunkFlashAttentionMetadata(
-            **prefill_metadata.asdict_zerocopy())
+            **prefill_metadata.asdict_zerocopy()
+        )
 
         if self.original_max_position_embeddings > 0:
             assert prefill_metadata.orig_seq_lens_tensor is not None
             prefill_metadata.scaling_factor = (
-                0.1 * torch.log(prefill_metadata.orig_seq_lens_tensor /
-                                self.original_max_position_embeddings) +
-                1.0).clip(min=1)
+                0.1
+                * torch.log(
+                    prefill_metadata.orig_seq_lens_tensor
+                    / self.original_max_position_embeddings
+                )
+                + 1.0
+            ).clip(min=1)
 
         self._cached_prefill_metadata = prefill_metadata
         return prefill_metadata
@@ -121,7 +130,8 @@ class DualChunkFlashAttentionMetadata(FlashAttentionMetadata):
             return None
 
         decode_metadata = DualChunkFlashAttentionMetadata(
-            **decode_metadata.asdict_zerocopy())
+            **decode_metadata.asdict_zerocopy()
+        )
 
         assert decode_metadata.orig_seq_lens_tensor is not None
         assert decode_metadata.block_tables is not None
@@ -132,9 +142,10 @@ class DualChunkFlashAttentionMetadata(FlashAttentionMetadata):
         batch_size = decode_metadata.num_decode_tokens
 
         if self.original_max_position_embeddings > 0:
-            decode_metadata.scaling_factor = (0.1 * torch.log(
-                cache_seq_lens / self.original_max_position_embeddings) +
-                                              1.0).clip(min=1)
+            decode_metadata.scaling_factor = (
+                0.1 * torch.log(cache_seq_lens / self.original_max_position_embeddings)
+                + 1.0
+            ).clip(min=1)
 
         seq_lens_intra = cache_seq_lens - chunk_num_curr * chunk_len
         max_seq_len_intra = seq_lens_intra.max().item()
@@ -153,12 +164,10 @@ class DualChunkFlashAttentionMetadata(FlashAttentionMetadata):
                 st + (max_seq_len_intra - 1) // self.block_size + 1,
                 (cache_seq_lens[i] - 1) // self.block_size + 1,
             )
-            block_tables_intra[i, :ed -
-                               st] = decode_metadata.block_tables[i, st:ed]
+            block_tables_intra[i, : ed - st] = decode_metadata.block_tables[i, st:ed]
         decode_metadata.block_tables_intra = block_tables_intra
 
-        seq_lens_succ = (chunk_num_curr -
-                         (chunk_num_curr - 1).clip(min=0)) * chunk_len
+        seq_lens_succ = (chunk_num_curr - (chunk_num_curr - 1).clip(min=0)) * chunk_len
         max_seq_len_succ = seq_lens_succ.max().item()
         decode_metadata.seq_lens_succ = seq_lens_succ
         decode_metadata.max_seq_len_succ = max_seq_len_succ
@@ -170,14 +179,12 @@ class DualChunkFlashAttentionMetadata(FlashAttentionMetadata):
                 device=decode_metadata.block_tables.device,
             )
             for i in range(batch_size):
-                st = ((chunk_num_curr[i] - 1).clip(min=0) * chunk_len //
-                      self.block_size)
+                st = (chunk_num_curr[i] - 1).clip(min=0) * chunk_len // self.block_size
                 ed = min(
                     st + (max_seq_len_succ - 1) // self.block_size + 1,
                     (cache_seq_lens[i] - 1) // self.block_size + 1,
                 )
-                block_tables_succ[i, :ed -
-                                  st] = decode_metadata.block_tables[i, st:ed]
+                block_tables_succ[i, : ed - st] = decode_metadata.block_tables[i, st:ed]
             decode_metadata.block_tables_succ = block_tables_succ
 
         seq_lens_inter = (chunk_num_curr - 1).clip(min=0) * chunk_len
@@ -191,22 +198,29 @@ class DualChunkFlashAttentionMetadata(FlashAttentionMetadata):
 
 class DualChunkFlashAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
 
-    def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int):
-        attn_metadata = super().build(seq_lens, query_lens,
-                                      cuda_graph_pad_size, batch_size)
+    def build(
+        self,
+        seq_lens: List[int],
+        query_lens: List[int],
+        cuda_graph_pad_size: int,
+        batch_size: int,
+    ):
+        attn_metadata = super().build(
+            seq_lens, query_lens, cuda_graph_pad_size, batch_size
+        )
         attn_metadata = DualChunkFlashAttentionMetadata(
-            **attn_metadata.asdict_zerocopy())
+            **attn_metadata.asdict_zerocopy()
+        )
 
         attn_metadata.block_size = self.runner.block_size
-        dual_chunk_attn_config = getattr(self.runner.model_config.hf_config,
-                                         "dual_chunk_attention_config", {})
-        attn_metadata.original_max_position_embeddings = \
-            dual_chunk_attn_config.get("original_max_position_embeddings", 0)
-        attn_metadata.chunk_size = dual_chunk_attn_config.get(
-            "chunk_size", 8192)
-        attn_metadata.local_size = dual_chunk_attn_config.get(
-            "local_size", 1024)
+        dual_chunk_attn_config = getattr(
+            self.runner.model_config.hf_config, "dual_chunk_attention_config", {}
+        )
+        attn_metadata.original_max_position_embeddings = dual_chunk_attn_config.get(
+            "original_max_position_embeddings", 0
+        )
+        attn_metadata.chunk_size = dual_chunk_attn_config.get("chunk_size", 8192)
+        attn_metadata.local_size = dual_chunk_attn_config.get("local_size", 1024)
 
         return attn_metadata
 
@@ -253,8 +267,9 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        self.sliding_window = ((sliding_window, sliding_window)
-                               if sliding_window is not None else (-1, -1))
+        self.sliding_window = (
+            (sliding_window, sliding_window) if sliding_window is not None else (-1, -1)
+        )
         self.kv_cache_dtype = kv_cache_dtype
 
         assert self.num_heads % self.num_kv_heads == 0
@@ -262,31 +277,34 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         if sliding_window is not None:
             # NOTE(woosuk): flash-attn's sliding window does not work with
             # paged KV cache.
-            raise ValueError(
-                "Sliding window is not supported in FlashAttention.")
+            raise ValueError("Sliding window is not supported in FlashAttention.")
 
-        support_head_sizes = (
-            DualChunkFlashAttentionBackend.get_supported_head_sizes())
+        support_head_sizes = DualChunkFlashAttentionBackend.get_supported_head_sizes()
 
         if head_size not in support_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
-                f"Supported head sizes are: {support_head_sizes}.")
+                f"Supported head sizes are: {support_head_sizes}."
+            )
 
         assert dual_chunk_attention_config is not None
         self.chunk_size = dual_chunk_attention_config.get("chunk_size", 8192)
         self.local_size = dual_chunk_attention_config.get("local_size", 1024)
         self.original_max_position_embeddings = dual_chunk_attention_config.get(
-            "original_max_position_embeddings", 0)
+            "original_max_position_embeddings", 0
+        )
         self.sparse_attention_config = dual_chunk_attention_config.get(
-            "sparse_attention_config", None)
+            "sparse_attention_config", None
+        )
         self.sparse_attention_enabled = dual_chunk_attention_config.get(
-            "sparse_attention_enabled", self.sparse_attention_config
-            is not None)
+            "sparse_attention_enabled", self.sparse_attention_config is not None
+        )
         self.sparse_attention_threshold = dual_chunk_attention_config.get(
-            "sparse_attention_threshold", 32768)
+            "sparse_attention_threshold", 32768
+        )
         self.sparse_attention_last_q = dual_chunk_attention_config.get(
-            "sparse_attention_last_q", 64)
+            "sparse_attention_last_q", 64
+        )
         self.dual_chunk_attention_config = dual_chunk_attention_config
 
         prefixes = prefix.split(".")
@@ -295,21 +313,19 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         if self.sparse_attention_config:
             self.sparse_attention_config = {
                 int(i): j
-                for i, j in self.sparse_attention_config[
-                    self.layer_idx].items()
+                for i, j in self.sparse_attention_config[self.layer_idx].items()
             }
             start_head = self.num_heads * get_tensor_model_parallel_rank()
             end_head = start_head + self.num_heads
             self.sparse_attention_config = [
-                self.sparse_attention_config[i]
-                for i in range(start_head, end_head)
+                self.sparse_attention_config[i] for i in range(start_head, end_head)
             ]
 
         if self.sparse_attention_enabled:
-            self.arange = torch.arange(self.sparse_attention_last_q,
-                                       device="cuda")
-            self.last_q_mask = (self.arange[None, None, :, None] >=
-                                self.arange[None, None, None, :])
+            self.arange = torch.arange(self.sparse_attention_last_q, device="cuda")
+            self.last_q_mask = (
+                self.arange[None, None, :, None] >= self.arange[None, None, None, :]
+            )
 
     def forward(  # type: ignore
         self,
@@ -347,10 +363,12 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         query = query.view(-1, self.num_heads, self.head_size)
         query_succ = query_succ.view(-1, self.num_heads, self.head_size)
         query_inter = query_inter.view(-1, self.num_heads, self.head_size)
-        query_succ_critical = query_succ_critical.view(-1, self.num_heads,
-                                                       self.head_size)
+        query_succ_critical = query_succ_critical.view(
+            -1, self.num_heads, self.head_size
+        )
         query_inter_critical = query_inter_critical.view(
-            -1, self.num_heads, self.head_size)
+            -1, self.num_heads, self.head_size
+        )
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
@@ -362,18 +380,19 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 current_start = 0
                 query_start_loc_cpu = prefill_meta.query_start_loc.cpu()
                 for i, orig_seq_len in enumerate(prefill_meta.orig_seq_lens):
-                    current_end = (current_start +
-                                   (query_start_loc_cpu[i + 1] -
-                                    query_start_loc_cpu[i]).item())
-                    key[current_start:current_end].mul_(
-                        prefill_meta.scaling_factor[i])
+                    current_end = (
+                        current_start
+                        + (query_start_loc_cpu[i + 1] - query_start_loc_cpu[i]).item()
+                    )
+                    key[current_start:current_end].mul_(prefill_meta.scaling_factor[i])
                     current_start = current_end
                 assert current_end <= attn_metadata.num_prefill_tokens
             if decode_meta := attn_metadata.decode_metadata:
                 assert decode_meta.scaling_factor is not None
                 scaling_factor = decode_meta.scaling_factor
-                key[attn_metadata.num_prefill_tokens:].mul_(
-                    scaling_factor.unsqueeze(-1).unsqueeze(-1))
+                key[attn_metadata.num_prefill_tokens :].mul_(
+                    scaling_factor.unsqueeze(-1).unsqueeze(-1)
+                )
 
         if kv_cache is not None and kv_cache.numel() > 0:
             key_cache = kv_cache[0]
@@ -417,8 +436,11 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if (kv_cache is None or prefill_meta.block_tables is None
-                    or prefill_meta.block_tables.numel() == 0):
+            if (
+                kv_cache is None
+                or prefill_meta.block_tables is None
+                or prefill_meta.block_tables.numel() == 0
+            ):
                 # normal attention, called during the profiling run.
                 out = flash_attn_varlen_func(
                     q=query,
@@ -439,48 +461,45 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 # prefix-enabled attention
                 assert prefill_meta.seq_lens is not None
                 assert prefill_meta.orig_seq_lens is not None
-                output[:num_prefill_tokens] = (
-                    self._dual_chunk_flash_attn_prefill(
-                        q=query,
-                        q_succ=query_succ,
-                        q_inter=query_inter,
-                        q_succ_critical=query_succ_critical,
-                        q_inter_critical=query_inter_critical,
-                        k=key_cache,
-                        v=value_cache,
-                        cu_seqlens_q=prefill_meta.query_start_loc,
-                        cu_seqlens_k=prefill_meta.seq_start_loc,
-                        orig_seq_lens=prefill_meta.orig_seq_lens,
-                        scaling_factor=prefill_meta.scaling_factor,
-                        softmax_scale=self.scale,
-                        causal=True,
-                        window_size=(-1, -1),
-                        alibi_slopes=self.alibi_slopes,
-                        block_table=prefill_meta.block_tables,
-                        chunk_size=self.chunk_size,
-                        local_size=self.local_size,
-                    ))
+                output[:num_prefill_tokens] = self._dual_chunk_flash_attn_prefill(
+                    q=query,
+                    q_succ=query_succ,
+                    q_inter=query_inter,
+                    q_succ_critical=query_succ_critical,
+                    q_inter_critical=query_inter_critical,
+                    k=key_cache,
+                    v=value_cache,
+                    cu_seqlens_q=prefill_meta.query_start_loc,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    orig_seq_lens=prefill_meta.orig_seq_lens,
+                    scaling_factor=prefill_meta.scaling_factor,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    window_size=(-1, -1),
+                    alibi_slopes=self.alibi_slopes,
+                    block_table=prefill_meta.block_tables,
+                    chunk_size=self.chunk_size,
+                    local_size=self.local_size,
+                )
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            output[num_prefill_tokens:] = (
-                self._dual_chunk_flash_attn_decoding(
-                    decode_query.unsqueeze(1),
-                    decode_query_succ.unsqueeze(1),
-                    decode_query_inter.unsqueeze(1),
-                    key_cache,
-                    value_cache,
-                    block_table=decode_meta.block_tables,
-                    cache_seqlens=decode_meta.seq_lens_tensor,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    alibi_slopes=self.alibi_slopes,
-                    chunk_size=self.chunk_size,
-                    local_size=self.local_size,
-                    original_max_position_embeddings=self.
-                    original_max_position_embeddings,
-                    decode_meta=decode_meta,
-                ).squeeze(1))
+            output[num_prefill_tokens:] = self._dual_chunk_flash_attn_decoding(
+                decode_query.unsqueeze(1),
+                decode_query_succ.unsqueeze(1),
+                decode_query_inter.unsqueeze(1),
+                key_cache,
+                value_cache,
+                block_table=decode_meta.block_tables,
+                cache_seqlens=decode_meta.seq_lens_tensor,
+                softmax_scale=self.scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                chunk_size=self.chunk_size,
+                local_size=self.local_size,
+                original_max_position_embeddings=self.original_max_position_embeddings,
+                decode_meta=decode_meta,
+            ).squeeze(1)
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)
 
@@ -506,14 +525,11 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         local_size: int = 1024,
     ):
         if alibi_slopes is not None:
-            raise ValueError(
-                "Dual Chunk Attention does not support alibi_slopes")
+            raise ValueError("Dual Chunk Attention does not support alibi_slopes")
         if not causal:
-            raise ValueError(
-                "Dual Chunk Attention does not support causal=False")
+            raise ValueError("Dual Chunk Attention does not support causal=False")
         if window_size != (-1, -1):
-            raise ValueError(
-                "Dual Chunk Attention does not support window_size")
+            raise ValueError("Dual Chunk Attention does not support window_size")
 
         cu_seqlens_q_cpu = cu_seqlens_q.cpu().tolist()
         cu_seqlens_k_cpu = cu_seqlens_k.cpu().tolist()
@@ -521,9 +537,9 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
 
         for i in range(0, len(cu_seqlens_q_cpu) - 1):
             qs = cu_seqlens_q_cpu[i]
-            qe = cu_seqlens_q_cpu[i:i + 2][-1]
+            qe = cu_seqlens_q_cpu[i : i + 2][-1]
             ks = cu_seqlens_k_cpu[i]
-            ke = cu_seqlens_k_cpu[i:i + 2][-1]
+            ke = cu_seqlens_k_cpu[i : i + 2][-1]
 
             current_q = q[qs:qe]
             current_q_succ = q_succ[qs:qe]
@@ -535,15 +551,16 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 current_k = k[ks:ke]
                 current_v = v[ks:ke]
                 current_block_table = None
-                current_orig_seq_lens = orig_seq_lens[i:i + 1]
+                current_orig_seq_lens = orig_seq_lens[i : i + 1]
             else:
-                current_block_table = block_table[i:i + 1]
-                current_orig_seq_lens = orig_seq_lens[i:i + 1]
+                current_block_table = block_table[i : i + 1]
+                current_orig_seq_lens = orig_seq_lens[i : i + 1]
                 current_k = k
                 current_v = v
             sparse_attn_enabled = (
                 self.sparse_attention_enabled
-                and current_orig_seq_lens[0] > self.sparse_attention_threshold)
+                and current_orig_seq_lens[0] > self.sparse_attention_threshold
+            )
 
             if current_q.shape[0] == 0:
                 continue
@@ -554,7 +571,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         (current_q.shape[0], current_q.shape[1], v.shape[2]),
                         device=q.device,
                         dtype=q.dtype,
-                    ))
+                    )
+                )
                 continue
 
             current_output = torch.empty_like(current_q)
@@ -562,10 +580,12 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
 
             if sparse_attn_enabled:
                 num_device_q_heads = current_q.size(-2)
-                heads_vertical_size = torch.empty(size=(num_device_q_heads, ),
-                                                  dtype=torch.int32)
-                heads_slash_size = torch.empty(size=(num_device_q_heads, ),
-                                               dtype=torch.int32)
+                heads_vertical_size = torch.empty(
+                    size=(num_device_q_heads,), dtype=torch.int32
+                )
+                heads_slash_size = torch.empty(
+                    size=(num_device_q_heads,), dtype=torch.int32
+                )
                 for head_id in range(current_q.size(-2)):
                     (
                         ty,
@@ -598,24 +618,27 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     sparse_attn_enabled=sparse_attn_enabled,
                     heads_vertical_size=heads_vertical_size,
                     heads_slash_size=heads_slash_size,
-                    group_size=group_size)
+                    group_size=group_size,
+                )
             else:
                 for head_id in range(current_q.size(-2)):
                     # (seq_len, num_heads, head_size)
                     current_q_head = current_q[:, head_id, :].unsqueeze(1)
-                    current_q_succ_head = \
-                        current_q_succ[:, head_id, :].unsqueeze(1)
-                    current_q_inter_head = \
-                        current_q_inter[:, head_id, :].unsqueeze(1)
-                    current_q_succ_head_critical = \
-                        current_q_succ_critical[:, head_id, :].unsqueeze(1)
-                    current_q_inter_head_critical = \
-                        current_q_inter_critical[:, head_id, :].unsqueeze(1)
+                    current_q_succ_head = current_q_succ[:, head_id, :].unsqueeze(1)
+                    current_q_inter_head = current_q_inter[:, head_id, :].unsqueeze(1)
+                    current_q_succ_head_critical = current_q_succ_critical[
+                        :, head_id, :
+                    ].unsqueeze(1)
+                    current_q_inter_head_critical = current_q_inter_critical[
+                        :, head_id, :
+                    ].unsqueeze(1)
                     if block_table is not None:
-                        current_k_head = current_k[..., head_id //
-                                                   group_size, :].unsqueeze(2)
-                        current_v_head = current_v[..., head_id //
-                                                   group_size, :].unsqueeze(2)
+                        current_k_head = current_k[
+                            ..., head_id // group_size, :
+                        ].unsqueeze(2)
+                        current_v_head = current_v[
+                            ..., head_id // group_size, :
+                        ].unsqueeze(2)
 
                     else:
                         current_k_head = current_k[:, head_id, :].unsqueeze(1)
@@ -634,11 +657,11 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         chunk_size,
                         local_size,
                         current_orig_seq_lens,
-                        scaling_factor.item(),
+                        scaling_factor[i].item(),
                         ke - ks,
                         sparse_attn_enabled=sparse_attn_enabled,
                     )
-                    current_output[:, head_id:head_id + 1, :] = current_out
+                    current_output[:, head_id : head_id + 1, :] = current_out
             all_outputs.append(current_output)
         return torch.cat(all_outputs, dim=0)
 
@@ -690,12 +713,15 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
             q_states_intra = q[qbegin:qend]
             # choose critical token
             if block_table is not None:
-                block_tables_intra = _get_block(block_table, block_size,
-                                                prev_chunk_end_pos, end)
-                k_states_intra = k[block_tables_intra[0]].view(
-                    -1, *k.shape[-2:])[:(end - prev_chunk_end_pos)]
-                v_states_intra = v[block_tables_intra[0]].view(
-                    -1, *v.shape[-2:])[:(end - prev_chunk_end_pos)]
+                block_tables_intra = _get_block(
+                    block_table, block_size, prev_chunk_end_pos, end
+                )
+                k_states_intra = k[block_tables_intra[0]].view(-1, *k.shape[-2:])[
+                    : (end - prev_chunk_end_pos)
+                ]
+                v_states_intra = v[block_tables_intra[0]].view(-1, *v.shape[-2:])[
+                    : (end - prev_chunk_end_pos)
+                ]
             else:
                 block_tables_intra = None
                 k_states_intra = k[prev_chunk_end_pos:end]
@@ -704,82 +730,109 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
             if sparse_attn_enabled:
                 last_q_size = min(qend - qbegin, self.sparse_attention_last_q)
                 _, num_device_k_heads, head_dim = k_states_intra.shape
-                k_states_intra = (k_states_intra.unsqueeze(2).repeat(
-                    1, 1, group_size,
-                    1).reshape(-1, num_device_k_heads * group_size, head_dim))
-                v_states_intra = (v_states_intra.unsqueeze(2).repeat(
-                    1, 1, group_size,
-                    1).reshape(-1, num_device_k_heads * group_size, head_dim))
+                k_states_intra = (
+                    k_states_intra.unsqueeze(2)
+                    .repeat(1, 1, group_size, 1)
+                    .reshape(-1, num_device_k_heads * group_size, head_dim)
+                )
+                v_states_intra = (
+                    v_states_intra.unsqueeze(2)
+                    .repeat(1, 1, group_size, 1)
+                    .reshape(-1, num_device_k_heads * group_size, head_dim)
+                )
                 qk_chunks.append(
-                    (q_states_intra.transpose(0, 1)[:, -last_q_size:] *
-                     softmax_scale) @ k_states_intra.permute(1, 2, 0))
+                    (q_states_intra.transpose(0, 1)[:, -last_q_size:] * softmax_scale)
+                    @ k_states_intra.permute(1, 2, 0)
+                )
 
             if prev_chunk_end_pos - chunk_len >= 0:
                 q_states_succ = q_succ[qbegin:qend]
                 q_states_succ_critical = q_succ_critical[qbegin:qend]
                 if block_table is not None:
                     block_tables_succ = _get_block(
-                        block_table, block_size,
-                        prev_chunk_end_pos - chunk_len, prev_chunk_end_pos)
-                    k_states_succ = k[block_tables_succ[0]].view(
-                        -1, *k.shape[-2:])[:chunk_len]
-                    v_states_succ = v[block_tables_succ[0]].view(
-                        -1, *v.shape[-2:])[:chunk_len]
+                        block_table,
+                        block_size,
+                        prev_chunk_end_pos - chunk_len,
+                        prev_chunk_end_pos,
+                    )
+                    k_states_succ = k[block_tables_succ[0]].view(-1, *k.shape[-2:])[
+                        :chunk_len
+                    ]
+                    v_states_succ = v[block_tables_succ[0]].view(-1, *v.shape[-2:])[
+                        :chunk_len
+                    ]
                 else:
-                    k_states_succ = k[prev_chunk_end_pos -
-                                      chunk_len:prev_chunk_end_pos]
-                    v_states_succ = v[prev_chunk_end_pos -
-                                      chunk_len:prev_chunk_end_pos]
+                    k_states_succ = k[
+                        prev_chunk_end_pos - chunk_len : prev_chunk_end_pos
+                    ]
+                    v_states_succ = v[
+                        prev_chunk_end_pos - chunk_len : prev_chunk_end_pos
+                    ]
 
                 if sparse_attn_enabled:
-                    k_states_succ = (k_states_succ.unsqueeze(2).repeat(
-                        1, 1, group_size,
-                        1).reshape(-1, num_device_k_heads * group_size,
-                                   head_dim))
-                    v_states_succ = (v_states_succ.unsqueeze(2).repeat(
-                        1, 1, group_size,
-                        1).reshape(-1, num_device_k_heads * group_size,
-                                   head_dim))
-                    qk_chunks.append((q_states_succ_critical.transpose(
-                        0, 1)[:, -last_q_size:] * softmax_scale)
-                                     @ k_states_succ.permute(1, 2, 0))
+                    k_states_succ = (
+                        k_states_succ.unsqueeze(2)
+                        .repeat(1, 1, group_size, 1)
+                        .reshape(-1, num_device_k_heads * group_size, head_dim)
+                    )
+                    v_states_succ = (
+                        v_states_succ.unsqueeze(2)
+                        .repeat(1, 1, group_size, 1)
+                        .reshape(-1, num_device_k_heads * group_size, head_dim)
+                    )
+                    qk_chunks.append(
+                        (
+                            q_states_succ_critical.transpose(0, 1)[:, -last_q_size:]
+                            * softmax_scale
+                        )
+                        @ k_states_succ.permute(1, 2, 0)
+                    )
 
             if prev_chunk_end_pos - chunk_len * 2 >= 0:
                 q_states_inter = q_inter[qbegin:qend]
                 q_states_inter_critical = q_inter_critical[qbegin:qend]
                 if block_table is not None:
                     block_tables_inter = _get_block(
-                        block_table, block_size, 0,
-                        prev_chunk_end_pos - chunk_len)
-                    k_states_inter = k[block_tables_inter[0]].view(
-                        -1, *k.shape[-2:])[:(prev_chunk_end_pos - chunk_len)]
-                    v_states_inter = v[block_tables_inter[0]].view(
-                        -1, *v.shape[-2:])[:(prev_chunk_end_pos - chunk_len)]
+                        block_table, block_size, 0, prev_chunk_end_pos - chunk_len
+                    )
+                    k_states_inter = k[block_tables_inter[0]].view(-1, *k.shape[-2:])[
+                        : (prev_chunk_end_pos - chunk_len)
+                    ]
+                    v_states_inter = v[block_tables_inter[0]].view(-1, *v.shape[-2:])[
+                        : (prev_chunk_end_pos - chunk_len)
+                    ]
                 else:
-                    k_states_inter = k[:prev_chunk_end_pos - chunk_len]
-                    v_states_inter = v[:prev_chunk_end_pos - chunk_len]
+                    k_states_inter = k[: prev_chunk_end_pos - chunk_len]
+                    v_states_inter = v[: prev_chunk_end_pos - chunk_len]
 
                 if sparse_attn_enabled:
-                    k_states_inter = (k_states_inter.unsqueeze(2).repeat(
-                        1, 1, group_size,
-                        1).reshape(-1, num_device_k_heads * group_size,
-                                   head_dim))
-                    v_states_inter = (v_states_inter.unsqueeze(2).repeat(
-                        1, 1, group_size,
-                        1).reshape(-1, num_device_k_heads * group_size,
-                                   head_dim))
-                    qk_chunks.append((q_states_inter_critical.transpose(
-                        0, 1)[:, -last_q_size:] * softmax_scale)
-                                     @ k_states_inter.permute(1, 2, 0))
+                    k_states_inter = (
+                        k_states_inter.unsqueeze(2)
+                        .repeat(1, 1, group_size, 1)
+                        .reshape(-1, num_device_k_heads * group_size, head_dim)
+                    )
+                    v_states_inter = (
+                        v_states_inter.unsqueeze(2)
+                        .repeat(1, 1, group_size, 1)
+                        .reshape(-1, num_device_k_heads * group_size, head_dim)
+                    )
+                    qk_chunks.append(
+                        (
+                            q_states_inter_critical.transpose(0, 1)[:, -last_q_size:]
+                            * softmax_scale
+                        )
+                        @ k_states_inter.permute(1, 2, 0)
+                    )
 
             if sparse_attn_enabled:
                 reversed_qk = qk_chunks[::-1]
                 qk = torch.cat(reversed_qk, dim=-1)
 
                 qk[:, :, -last_q_size:] = torch.where(
-                    self.last_q_mask[..., -last_q_size:,
-                                     -last_q_size:].to(qk.device),
-                    qk[:, :, -last_q_size:], -torch.inf)
+                    self.last_q_mask[..., -last_q_size:, -last_q_size:].to(qk.device),
+                    qk[:, :, -last_q_size:],
+                    -torch.inf,
+                )
                 qk = F.softmax(qk, dim=-1, dtype=torch.float32)
 
                 vertical = qk.sum(-2, keepdim=True)
@@ -794,194 +847,220 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 vertical = vertical.reshape((n_heads, -1))
                 # prevent out of range when prompt size < max_vertical_topk
                 max_vertical_topk = min(vertical.shape[-1], max_vertical_topk)
-                vertical_topk_buffer = torch.topk(vertical, max_vertical_topk,
-                                                  -1).indices
-                slash_topk_buffer = torch.empty(size=(n_heads, max_slash_topk),
-                                                dtype=torch.int64,
-                                                device=qk.device)
+                vertical_topk_buffer = torch.topk(
+                    vertical, max_vertical_topk, -1
+                ).indices
+                slash_topk_buffer = torch.empty(
+                    size=(n_heads, max_slash_topk), dtype=torch.int64, device=qk.device
+                )
                 for head_i in range(n_heads):
                     #  (nqheads=1, lastq, k_len)
-                    head_score = qk[head_i:head_i + 1, :, :]
+                    head_score = qk[head_i : head_i + 1, :, :]
                     slash_scores = _sum_all_diagonal_matrix(head_score)
                     if head_score.size(1) != 1:
                         # drop right up corner
-                        slash_scores = slash_scores[..., :-last_q_size + 1]
+                        slash_scores = slash_scores[..., : -last_q_size + 1]
                     slash_scores[..., -100:] = torch.inf
 
                     head_slash_size = heads_slash_size[head_i]
                     head_slash_size = min(head_slash_size, vertical.size(-1))
-                    slash_topk = torch.topk(slash_scores, head_slash_size,
-                                            -1).indices
-                    #（nheads, max_topk）
+                    slash_topk = torch.topk(slash_scores, head_slash_size, -1).indices
+                    # （nheads, max_topk）
                     slash_topk_buffer[head_i, :head_slash_size] = slash_topk
 
                     # reset heads topk
                     heads_slash_size[head_i] = head_slash_size
                     heads_vertical_size[head_i] = min(
-                        heads_vertical_size[head_i], max_vertical_topk)
+                        heads_vertical_size[head_i], max_vertical_topk
+                    )
 
                 # store
-                vertical_buffer = torch.full((n_heads, max_vertical_topk),
-                                             int32_max,
-                                             dtype=torch.int64,
-                                             device=q.device)
-                slash_buffer = torch.full((n_heads, max_slash_topk),
-                                          int32_min,
-                                          dtype=torch.int64,
-                                          device=q.device)
-                succ_vertical_buffer = torch.full((n_heads, max_vertical_topk),
-                                                  int32_max,
-                                                  dtype=torch.int64,
-                                                  device=q.device)
-                succ_slash_buffer = torch.full((n_heads, max_slash_topk),
-                                               int32_min,
-                                               dtype=torch.int64,
-                                               device=q.device)
+                vertical_buffer = torch.full(
+                    (n_heads, max_vertical_topk),
+                    int32_max,
+                    dtype=torch.int64,
+                    device=q.device,
+                )
+                slash_buffer = torch.full(
+                    (n_heads, max_slash_topk),
+                    int32_min,
+                    dtype=torch.int64,
+                    device=q.device,
+                )
+                succ_vertical_buffer = torch.full(
+                    (n_heads, max_vertical_topk),
+                    int32_max,
+                    dtype=torch.int64,
+                    device=q.device,
+                )
+                succ_slash_buffer = torch.full(
+                    (n_heads, max_slash_topk),
+                    int32_min,
+                    dtype=torch.int64,
+                    device=q.device,
+                )
                 inter_vertical_buffer = torch.full(
                     (n_heads, max_vertical_topk),
                     int32_max,
                     dtype=torch.int64,
-                    device=q.device)
-                inter_slash_buffer = torch.full((n_heads, max_slash_topk),
-                                                int32_min,
-                                                dtype=torch.int64,
-                                                device=q.device)
+                    device=q.device,
+                )
+                inter_slash_buffer = torch.full(
+                    (n_heads, max_slash_topk),
+                    int32_min,
+                    dtype=torch.int64,
+                    device=q.device,
+                )
 
-                vertical_size_buffer = torch.empty(size=(n_heads, ),
-                                                   dtype=torch.int32,
-                                                   device=q.device)
-                slash_sizes_buffer = torch.empty(size=(n_heads, ),
-                                                 dtype=torch.int32,
-                                                 device=q.device)
-                succ_vertical_size_buffer = torch.empty(size=(n_heads, ),
-                                                        dtype=torch.int32,
-                                                        device=q.device)
-                succ_slash_sizes_buffer = torch.empty(size=(n_heads, ),
-                                                      dtype=torch.int32,
-                                                      device=q.device)
-                inter_vertical_size_buffer = torch.empty(size=(n_heads, ),
-                                                         dtype=torch.int32,
-                                                         device=q.device)
-                inter_slash_sizes_buffer = torch.empty(size=(n_heads, ),
-                                                       dtype=torch.int32,
-                                                       device=q.device)
+                vertical_size_buffer = torch.empty(
+                    size=(n_heads,), dtype=torch.int32, device=q.device
+                )
+                slash_sizes_buffer = torch.empty(
+                    size=(n_heads,), dtype=torch.int32, device=q.device
+                )
+                succ_vertical_size_buffer = torch.empty(
+                    size=(n_heads,), dtype=torch.int32, device=q.device
+                )
+                succ_slash_sizes_buffer = torch.empty(
+                    size=(n_heads,), dtype=torch.int32, device=q.device
+                )
+                inter_vertical_size_buffer = torch.empty(
+                    size=(n_heads,), dtype=torch.int32, device=q.device
+                )
+                inter_slash_sizes_buffer = torch.empty(
+                    size=(n_heads,), dtype=torch.int32, device=q.device
+                )
 
                 for head_i in range(n_heads):
                     vertical_topk = vertical_topk_buffer[
-                        head_i, :heads_vertical_size[head_i]]
+                        head_i, : heads_vertical_size[head_i]
+                    ]
                     # intra
-                    intra_vertical_indices = vertical_topk[
-                        vertical_topk >=
-                        prev_chunk_end_pos] - prev_chunk_end_pos
+                    intra_vertical_indices = (
+                        vertical_topk[vertical_topk >= prev_chunk_end_pos]
+                        - prev_chunk_end_pos
+                    )
                     if intra_vertical_indices.nelement() == 0:
-                        intra_vertical_indices = torch.cat([
-                            intra_vertical_indices,
-                            torch.arange(0,
-                                         k_states_intra.size(0),
-                                         max(1,
-                                             k_states_intra.size(0) / 5),
-                                         dtype=torch.int32,
-                                         device=intra_vertical_indices.device)
-                        ])
-                    slash_topk = slash_topk_buffer[
-                        head_i, :heads_slash_size[head_i]]
-                    intra_slash_indices = (
-                        (qk.size(-1) - 1) -
-                        slash_topk[slash_topk >= prev_chunk_end_pos])
+                        intra_vertical_indices = torch.cat(
+                            [
+                                intra_vertical_indices,
+                                torch.arange(
+                                    0,
+                                    k_states_intra.size(0),
+                                    max(1, k_states_intra.size(0) / 5),
+                                    dtype=torch.int32,
+                                    device=intra_vertical_indices.device,
+                                ),
+                            ]
+                        )
+                    slash_topk = slash_topk_buffer[head_i, : heads_slash_size[head_i]]
+                    intra_slash_indices = (qk.size(-1) - 1) - slash_topk[
+                        slash_topk >= prev_chunk_end_pos
+                    ]
                     # fill buffer
                     v_count = intra_vertical_indices.nelement()
                     s_count = intra_slash_indices.nelement()
                     vertical_size_buffer[head_i] = v_count
                     slash_sizes_buffer[head_i] = s_count
-                    vertical_buffer[head_i, :v_count].copy_(
-                        intra_vertical_indices)
+                    vertical_buffer[head_i, :v_count].copy_(intra_vertical_indices)
                     slash_buffer[head_i, :s_count].copy_(intra_slash_indices)
                     # succ
                     if prev_chunk_end_pos - chunk_len >= 0:
                         succ_vertical_indices = vertical_topk[
                             (vertical_topk < prev_chunk_end_pos)
-                            & (vertical_topk >= prev_chunk_end_pos -
-                               chunk_len)] - (prev_chunk_end_pos - chunk_len)
+                            & (vertical_topk >= prev_chunk_end_pos - chunk_len)
+                        ] - (prev_chunk_end_pos - chunk_len)
                         # TODO: support no vertical
                         if succ_vertical_indices.nelement() == 0:
-                            succ_vertical_indices = torch.cat([
-                                succ_vertical_indices,
-                                torch.arange(
-                                    0,
-                                    k_states_succ.size(0),
-                                    max(1,
-                                        k_states_succ.size(0) / 5),
-                                    dtype=torch.int32,
-                                    device=intra_vertical_indices.device)
-                            ])
+                            succ_vertical_indices = torch.cat(
+                                [
+                                    succ_vertical_indices,
+                                    torch.arange(
+                                        0,
+                                        k_states_succ.size(0),
+                                        max(1, k_states_succ.size(0) / 5),
+                                        dtype=torch.int32,
+                                        device=intra_vertical_indices.device,
+                                    ),
+                                ]
+                            )
                         succ_slash_indices = (
-                            (prev_chunk_end_pos + (qend - qbegin) - 1) -
-                            slash_topk[((slash_topk >=
-                                         (prev_chunk_end_pos - chunk_len)) &
-                                        (slash_topk < (prev_chunk_end_pos +
-                                                       (qend - qbegin))))])
+                            prev_chunk_end_pos + (qend - qbegin) - 1
+                        ) - slash_topk[
+                            (
+                                (slash_topk >= (prev_chunk_end_pos - chunk_len))
+                                & (slash_topk < (prev_chunk_end_pos + (qend - qbegin)))
+                            )
+                        ]
                         if succ_slash_indices.nelement() == 0:
-                            succ_slash_indices = torch.cat([
-                                succ_slash_indices,
-                                torch.arange(
-                                    0,
-                                    k_states_succ.size(0),
-                                    max(1,
-                                        k_states_succ.size(0) / 5),
-                                    dtype=torch.int32,
-                                    device=intra_vertical_indices.device)
-                            ])
+                            succ_slash_indices = torch.cat(
+                                [
+                                    succ_slash_indices,
+                                    torch.arange(
+                                        0,
+                                        k_states_succ.size(0),
+                                        max(1, k_states_succ.size(0) / 5),
+                                        dtype=torch.int32,
+                                        device=intra_vertical_indices.device,
+                                    ),
+                                ]
+                            )
                         # fill buffer
                         v_count = succ_vertical_indices.nelement()
                         s_count = succ_slash_indices.nelement()
                         succ_vertical_size_buffer[head_i] = v_count
                         succ_slash_sizes_buffer[head_i] = s_count
                         succ_vertical_buffer[head_i, :v_count].copy_(
-                            succ_vertical_indices)
-                        succ_slash_buffer[head_i, :s_count].copy_(
-                            succ_slash_indices)
+                            succ_vertical_indices
+                        )
+                        succ_slash_buffer[head_i, :s_count].copy_(succ_slash_indices)
 
                     if prev_chunk_end_pos - 2 * chunk_len >= 0:
                         inter_vertical_indices = vertical_topk[
-                            vertical_topk < prev_chunk_end_pos - chunk_len]
+                            vertical_topk < prev_chunk_end_pos - chunk_len
+                        ]
 
                         if inter_vertical_indices.nelement() == 0:
-                            inter_vertical_indices = torch.cat([
-                                inter_vertical_indices,
-                                torch.arange(
-                                    0,
-                                    k_states_inter.size(0),
-                                    max(1,
-                                        k_states_inter.size(0) / 5),
-                                    dtype=torch.int32,
-                                    device=intra_vertical_indices.device)
-                            ])
+                            inter_vertical_indices = torch.cat(
+                                [
+                                    inter_vertical_indices,
+                                    torch.arange(
+                                        0,
+                                        k_states_inter.size(0),
+                                        max(1, k_states_inter.size(0) / 5),
+                                        dtype=torch.int32,
+                                        device=intra_vertical_indices.device,
+                                    ),
+                                ]
+                            )
                         inter_slash_indices = (
-                            (prev_chunk_end_pos - chunk_len +
-                             (qend - qbegin) - 1) -
-                            slash_topk[slash_topk <
-                                       (prev_chunk_end_pos - chunk_len +
-                                        (qend - qbegin))])
+                            prev_chunk_end_pos - chunk_len + (qend - qbegin) - 1
+                        ) - slash_topk[
+                            slash_topk
+                            < (prev_chunk_end_pos - chunk_len + (qend - qbegin))
+                        ]
                         if inter_slash_indices.nelement() == 0:
-                            inter_slash_indices = torch.cat([
-                                inter_slash_indices,
-                                torch.arange(
-                                    0,
-                                    k_states_inter.size(0),
-                                    max(1,
-                                        k_states_inter.size(0) / 5),
-                                    dtype=torch.int32,
-                                    device=intra_vertical_indices.device)
-                            ])
+                            inter_slash_indices = torch.cat(
+                                [
+                                    inter_slash_indices,
+                                    torch.arange(
+                                        0,
+                                        k_states_inter.size(0),
+                                        max(1, k_states_inter.size(0) / 5),
+                                        dtype=torch.int32,
+                                        device=intra_vertical_indices.device,
+                                    ),
+                                ]
+                            )
                         # fill buffer
                         v_count = inter_vertical_indices.nelement()
                         s_count = inter_slash_indices.nelement()
                         inter_vertical_size_buffer[head_i] = v_count
                         inter_slash_sizes_buffer[head_i] = s_count
                         inter_vertical_buffer[head_i, :v_count].copy_(
-                            inter_vertical_indices)
-                        inter_slash_buffer[head_i, :s_count].copy_(
-                            inter_slash_indices)
+                            inter_vertical_indices
+                        )
+                        inter_slash_buffer[head_i, :s_count].copy_(inter_slash_indices)
             else:
                 intra_vertical_indices, intra_slash_indices = None, None
                 succ_vertical_indices, succ_slash_indices = None, None
@@ -1000,7 +1079,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     vertical_indices_count=vertical_size_buffer,
                     slash_indices_count=slash_sizes_buffer,
                     mergehead_softmax_scale=softmax_scale,
-                    sparse_attn_enabled=sparse_attn_enabled)
+                    sparse_attn_enabled=sparse_attn_enabled,
+                )
             else:
                 flash_result = self._do_flash_attn(
                     q_states_intra,
@@ -1011,7 +1091,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     stage="intra",
                     vertical_indices=intra_vertical_indices,
                     slash_indices=intra_slash_indices,
-                    sparse_attn_enabled=sparse_attn_enabled)
+                    sparse_attn_enabled=sparse_attn_enabled,
+                )
             flash_per_chunk.append(flash_result)
 
             if prev_chunk_end_pos - chunk_len >= 0:
@@ -1028,7 +1109,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         vertical_indices_count=succ_vertical_size_buffer,
                         slash_indices_count=succ_slash_sizes_buffer,
                         mergehead_softmax_scale=softmax_scale,
-                        sparse_attn_enabled=sparse_attn_enabled)
+                        sparse_attn_enabled=sparse_attn_enabled,
+                    )
                 else:
                     flash_result = self._do_flash_attn(
                         q_states_succ,
@@ -1039,7 +1121,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         stage="succ",
                         vertical_indices=succ_vertical_indices,
                         slash_indices=succ_slash_indices,
-                        sparse_attn_enabled=sparse_attn_enabled)
+                        sparse_attn_enabled=sparse_attn_enabled,
+                    )
                 flash_per_chunk.append(flash_result)
 
             if prev_chunk_end_pos - chunk_len * 2 >= 0:
@@ -1056,7 +1139,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         vertical_indices_count=inter_vertical_size_buffer,
                         slash_indices_count=inter_slash_sizes_buffer,
                         mergehead_softmax_scale=softmax_scale,
-                        sparse_attn_enabled=sparse_attn_enabled)
+                        sparse_attn_enabled=sparse_attn_enabled,
+                    )
                 else:
                     flash_result = self._do_flash_attn(
                         q_states_inter,
@@ -1067,7 +1151,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         stage="inter",
                         vertical_indices=inter_vertical_indices,
                         slash_indices=inter_slash_indices,
-                        sparse_attn_enabled=sparse_attn_enabled)
+                        sparse_attn_enabled=sparse_attn_enabled,
+                    )
                 flash_per_chunk.append(flash_result)
 
             flash_results.append(flash_per_chunk)
@@ -1116,8 +1201,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
             k = key_states
             v = value_states
 
-            if (vertical_indices_count is not None and \
-                    slash_indices_count is not None):
+            if vertical_indices_count is not None and slash_indices_count is not None:
                 assert mergehead_softmax_scale is not None
 
                 res, s_lse = _vertical_slash_sparse_attention(
@@ -1130,21 +1214,25 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     causal=causal,
                     stage=stage,
                     vertical_indices_count=vertical_indices_count,
-                    slash_indices_count=slash_indices_count)
-                res = res.view(q_heads, q_len,
-                               h_dim).transpose(0, 1)  # (qlen,nhead,h_dim)
-                s_lse = s_lse.view(
-                    q_heads, q_len,
-                    1).squeeze(-1).unsqueeze(0).float()  # (1, nhead,qlen)
+                    slash_indices_count=slash_indices_count,
+                )
+                res = res.view(q_heads, q_len, h_dim).transpose(
+                    0, 1
+                )  # (qlen,nhead,h_dim)
+                s_lse = (
+                    s_lse.view(q_heads, q_len, 1).squeeze(-1).unsqueeze(0).float()
+                )  # (1, nhead,qlen)
             else:
-                res, s_lse = _vertical_slash_sparse_attention(q,
-                                                              k,
-                                                              v,
-                                                              vertical_indices,
-                                                              slash_indices,
-                                                              softmax_scale,
-                                                              causal=causal,
-                                                              stage=stage)
+                res, s_lse = _vertical_slash_sparse_attention(
+                    q,
+                    k,
+                    v,
+                    vertical_indices,
+                    slash_indices,
+                    softmax_scale,
+                    causal=causal,
+                    stage=stage,
+                )
                 res = res.view(q_len, q_heads, h_dim)
                 s_lse = s_lse.view(q_len, q_heads, 1).transpose(0, 2).float()
             return res, s_lse
@@ -1154,20 +1242,21 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
             k=key_states.bfloat16(),
             v=value_states.bfloat16(),
             softmax_scale=softmax_scale,
-            cu_seqlens_q=torch.tensor([0, query_states.shape[0]],
-                                      dtype=torch.int32,
-                                      device=query_states.device),
+            cu_seqlens_q=torch.tensor(
+                [0, query_states.shape[0]],
+                dtype=torch.int32,
+                device=query_states.device,
+            ),
             max_seqlen_q=query_states.shape[0],
-            cu_seqlens_k=torch.tensor([0, max_seqlen_k],
-                                      dtype=torch.int32,
-                                      device=query_states.device),
+            cu_seqlens_k=torch.tensor(
+                [0, max_seqlen_k], dtype=torch.int32, device=query_states.device
+            ),
             max_seqlen_k=max_seqlen_k,
             causal=causal,
             block_table=block_table,
             return_softmax_lse=True,
         )
-        softmax_lse = softmax_lse.view(q_len, q_heads, 1).transpose(0,
-                                                                    2).float()
+        softmax_lse = softmax_lse.view(q_len, q_heads, 1).transpose(0, 2).float()
         return output, softmax_lse
 
     def _merge_attn_outputs(
@@ -1185,12 +1274,12 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     logits_all.append(flash_per_chunk[0][1])
                 continue
 
-            attn_outputs = torch.stack([
-                flash_attn_output[0] for flash_attn_output in flash_per_chunk
-            ])
-            logits = torch.stack([
-                flash_attn_output[1] for flash_attn_output in flash_per_chunk
-            ])
+            attn_outputs = torch.stack(
+                [flash_attn_output[0] for flash_attn_output in flash_per_chunk]
+            )
+            logits = torch.stack(
+                [flash_attn_output[1] for flash_attn_output in flash_per_chunk]
+            )
             logits = logits.to(torch.float32)
 
             if return_lse:
@@ -1208,8 +1297,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
             attn_outputs_all.append(attn_outputs.sum(dim=0))
 
         if return_lse:
-            return (torch.cat(attn_outputs_all,
-                              dim=0), torch.cat(logits_all, dim=-1))
+            return (torch.cat(attn_outputs_all, dim=0), torch.cat(logits_all, dim=-1))
         else:
             return torch.cat(attn_outputs_all, dim=0)
 
@@ -1231,8 +1319,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         decode_meta: DualChunkFlashAttentionMetadata,
     ):
         if not causal:
-            raise ValueError(
-                "Dual Chunk Attention does not support causal=False")
+            raise ValueError("Dual Chunk Attention does not support causal=False")
 
         block_size = value_cache.shape[1]
         chunk_len = chunk_size - local_size
@@ -1244,10 +1331,10 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
             query = (query * scaling_factor.view(-1, 1, 1, 1)).to(
                 query.dtype
             )  # possible for numerical issue, need to fused in the kernel
-            query_succ = (query_succ * scaling_factor.view(-1, 1, 1, 1)).to(
-                query.dtype)
+            query_succ = (query_succ * scaling_factor.view(-1, 1, 1, 1)).to(query.dtype)
             query_inter = (query_inter * scaling_factor.view(-1, 1, 1, 1)).to(
-                query.dtype)
+                query.dtype
+            )
         outputs_list = []
         softmax_lses_list = []
 
@@ -1262,7 +1349,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 softmax_scale,
                 alibi_slopes,
                 causal=False,
-            ))
+            )
+        )
         outputs_list.append(intra_output)
         softmax_lses_list.append(intra_softmax_lse)
 
@@ -1278,7 +1366,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     softmax_scale,
                     alibi_slopes,
                     causal=False,
-                ))
+                )
+            )
             outputs_list.append(succ_output)
             softmax_lses_list.append(succ_softmax_lse)
 
@@ -1289,12 +1378,13 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     query_inter,
                     key_cache,
                     value_cache,
-                    block_table[:, :decode_meta.max_seq_len_inter],
+                    block_table[:, : decode_meta.max_seq_len_inter],
                     decode_meta.seq_lens_inter,
                     softmax_scale,
                     alibi_slopes,
                     causal=False,
-                ))
+                )
+            )
             outputs_list.append(inter_output)
             softmax_lses_list.append(inter_softmax_lse)
         outputs = torch.stack(outputs_list, dim=0)
@@ -1331,7 +1421,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
             causal=causal,
             return_softmax_lse=True,
         )
-        mask = (cache_seqlens == 0)
+        mask = cache_seqlens == 0
         out[mask] = 0
         softmax_lse[mask] = -float("inf")
         return out, softmax_lse
@@ -1360,21 +1450,23 @@ def _vertical_slash_sparse_attention(
     _, _, kv_seq_len, _ = key.shape
 
     if head_dim not in [16, 32, 64, 128, 256, 512]:
-        target_dim = 2**math.ceil(math.log2(head_dim)) - head_dim
+        target_dim = 2 ** math.ceil(math.log2(head_dim)) - head_dim
         query = F.pad(query, [0, target_dim, 0, 0, 0, 0, 0, 0])
         key = F.pad(key, [0, target_dim, 0, 0, 0, 0, 0, 0])
         value = F.pad(value, [0, target_dim, 0, 0, 0, 0, 0, 0])
 
-    v_idx = v_idx.to(torch.int32).reshape(
-        (batch_size, num_heads, -1)).sort(dim=-1, descending=False)[0]
-    s_idx = s_idx.to(torch.int32).reshape(
-        (batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
-    q_seqlens = torch.tensor([context_size],
-                             dtype=torch.int32,
-                             device=query.device)
-    kv_seqlens = torch.tensor([kv_seq_len],
-                              dtype=torch.int32,
-                              device=query.device)
+    v_idx = (
+        v_idx.to(torch.int32)
+        .reshape((batch_size, num_heads, -1))
+        .sort(dim=-1, descending=False)[0]
+    )
+    s_idx = (
+        s_idx.to(torch.int32)
+        .reshape((batch_size, num_heads, -1))
+        .sort(dim=-1, descending=True)[0]
+    )
+    q_seqlens = torch.tensor([context_size], dtype=torch.int32, device=query.device)
+    kv_seqlens = torch.tensor([kv_seq_len], dtype=torch.int32, device=query.device)
 
     if vertical_indices_count is not None and slash_indices_count is not None:
         (
@@ -1383,19 +1475,33 @@ def _vertical_slash_sparse_attention(
             column_count,
             column_index,
         ) = ops.convert_vertical_slash_indexes_mergehead(
-            q_seqlens, kv_seqlens, v_idx, s_idx, vertical_indices_count,
-            slash_indices_count, context_size, block_size_M, block_size_N,
-            causal)
+            q_seqlens,
+            kv_seqlens,
+            v_idx,
+            s_idx,
+            vertical_indices_count,
+            slash_indices_count,
+            context_size,
+            block_size_M,
+            block_size_N,
+            causal,
+        )
     else:
         (
             block_count,
             block_offset,
             column_count,
             column_index,
-        ) = ops.convert_vertical_slash_indexes(q_seqlens, kv_seqlens, v_idx,
-                                               s_idx, context_size,
-                                               block_size_M, block_size_N,
-                                               causal)
+        ) = ops.convert_vertical_slash_indexes(
+            q_seqlens,
+            kv_seqlens,
+            v_idx,
+            s_idx,
+            context_size,
+            block_size_M,
+            block_size_N,
+            causal,
+        )
 
     q = query.transpose(1, 2).contiguous()
     k = key.transpose(1, 2).contiguous()
@@ -1414,8 +1520,7 @@ def _vertical_slash_sparse_attention(
     )
     out = out.transpose(1, 2).contiguous()
     softmax_lse = lse.reshape(*lse.shape, 1)
-    return (out[..., :context_size, :head_dim],
-            softmax_lse[..., :context_size, :])
+    return (out[..., :context_size, :head_dim], softmax_lse[..., :context_size, :])
 
 
 def _sum_all_diagonal_matrix(mat: torch.tensor):
@@ -1425,15 +1530,15 @@ def _sum_all_diagonal_matrix(mat: torch.tensor):
     # pads the matrix on left and right
     mat_padded = torch.cat((zero_mat, mat, zero_mat), -1)
     # Change the strides
-    mat_strided = mat_padded.as_strided((1, n, n + m),
-                                        (n * (2 * n + m), 2 * n + m + 1, 1))
+    mat_strided = mat_padded.as_strided(
+        (1, n, n + m), (n * (2 * n + m), 2 * n + m + 1, 1)
+    )
     # Sums the resulting matrix's columns
     sum_diags = torch.sum(mat_strided, 1)
     return sum_diags[:, 1:]  # drop left bottom corner
 
 
-def _get_block(block_table: torch.Tensor, block_size: int, begin: int,
-               end: int):
+def _get_block(block_table: torch.Tensor, block_size: int, begin: int, end: int):
     begin_block = begin // block_size
     end_block = (end - 1) // block_size + 1
     return block_table[:, begin_block:end_block]
