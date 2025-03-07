@@ -392,6 +392,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: DualChunkFlashAttentionMetadata,
+        **kwargs,
     ) -> torch.Tensor:
         """Forward pass with DualChunkFlashAttention.
         Args:

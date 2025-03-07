@@ -119,7 +119,6 @@ class Attention(nn.Module):
         self.sliding_window = sliding_window
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
@@ -282,7 +281,10 @@ def unified_attention(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata,
+                             fp8_out_scale=fp8_out_scale)
 
 
 def unified_attention_fake(

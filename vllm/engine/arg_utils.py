@@ -20,7 +20,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
+from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, 
+                        STR_MINFERENCE_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         StoreBoolean)
 
 if TYPE_CHECKING:
@@ -1045,6 +1046,13 @@ class EngineArgs:
                 "Cuda graph is not supported with DualChunkFlashAttention. "
                 "To run the model in eager mode, set 'enforce_eager=True' "
                 "or use '--enforce-eager' in the CLI.")
+
+        if envs.VLLM_ATTENTION_BACKEND in [STR_MINFERENCE_FLASH_ATTN_VAL]:
+            assert self.enforce_eager, (
+                "Cuda graph is not supported with MInferenceSparseAttention. "
+                "To run the model in eager mode, set 'enforce_eager=True' "
+                "or use '--enforce-eager' in the CLI."
+            )
 
         assert self.cpu_offload_gb >= 0, (
             "CPU offload space must be non-negative"
