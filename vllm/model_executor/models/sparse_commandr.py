@@ -56,16 +56,15 @@ class SparseCohereAttention(CohereAttention):
 
     def __init__(
         self,
-        layer_idx: int,
         config: CohereConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
-        super().__init(layer_idx, config, cache_config, quant_config, prefix)
+        nn.Module.__init__(self)
         assert hasattr(config, "sparse_attention_config"), \
             "Must provide a sparse_attention_config.json file in model directory!"
-        self.sparse_attention_config = self.config.sparse_attention_config
+        self.sparse_attention_config = config.sparse_attention_config
         tp_size = get_tensor_model_parallel_world_size()
         self.config = config
         self.attention_dropout = config.attention_dropout

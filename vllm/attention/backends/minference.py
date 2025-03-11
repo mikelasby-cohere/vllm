@@ -23,6 +23,8 @@ from vllm.attention.backends.flash_attn import (
     FlashAttentionMetadata,
     FlashAttentionMetadataBuilder,
     get_num_prefill_decode_query_kv_tokens,
+    _get_causal_option,
+    _get_query_key_seq_metadata,
 )
 from vllm.vllm_flash_attn import (
     flash_attn_varlen_func,
@@ -111,7 +113,7 @@ class MInferenceFlashAttentionInterface(ABC):
 # MInferenceAttention
 
 
-class MInferenceAttentionnBackend(FlashAttentionBackend):
+class MInferenceAttentionBackend(FlashAttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "MInferenceAttention"
@@ -149,7 +151,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         attn_type: str = AttentionType.DECODER,
         **extra_impl_args,
     ) -> None:
-        self.super().__init__(
+        super().__init__(
             num_heads,
             head_size,
             scale,
@@ -269,67 +271,74 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 or prefill_meta.block_tables is None
                 or prefill_meta.block_tables.numel() == 0
             ):
-                # normal attention, called during the profiling run.
-                out = flash_attn_varlen_func(
+                # When block_tables are not filled, it means q and k are the
+                # prompt, and they have the same length.
+                q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = (
+                    _get_query_key_seq_metadata(prefill_meta, True, attn_type)
+                )
+                key = key[:num_prefill_kv_tokens]
+                value = value[:num_prefill_kv_tokens]
+                flash_attn_varlen_func(
                     q=query,
                     k=key,
                     v=value,
-                    cu_seqlens_q=prefill_meta.seq_start_loc,
-                    cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_q=prefill_meta.max_prefill_seq_len,
-                    max_seqlen_k=prefill_meta.max_prefill_seq_len,
+                    cu_seqlens_q=q_seq_start_loc,
+                    cu_seqlens_k=k_seq_start_loc,
+                    max_seqlen_q=q_seq_len,
+                    max_seqlen_k=k_seq_len,
                     softmax_scale=self.scale,
-                    causal=True,
+                    causal=_get_causal_option(attn_type),
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
+                    softcap=logits_soft_cap,
+                    out=prefill_output,
+                    fa_version=self.vllm_flash_attn_version,
                 )
-                assert output[:num_prefill_query_tokens].shape == out.shape
-                output[:num_prefill_query_tokens] = out
             else:
-                # attn w/ kv cache: k/v cache should have 0 numel here.
-                assert (
-                    key_cache.numel() == 0 and value_cache.numel() == 0
-                ), "k/v caches not empty before sparse prefill!"  # TODO: Won't these have values during subsequent chunk prefill?
                 assert (
                     attn_type == AttentionType.DECODER
                 ), "Only decoder-only models support prefix caching"
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
-                self._sparse_flash_attn_prefill(
-                    q=query,
-                    k=key_cache,
-                    v=value_cache,
-                    cu_seqlens_q=prefill_meta.query_start_loc,
-                    max_seqlen_q=prefill_meta.max_query_len,
-                    seqused_k=prefill_meta.seq_lens_tensor,
-                    max_seqlen_k=max_seq_len,
-                    softmax_scale=softmax_scale,
-                    causal=True,
-                    window_size=window_size,
-                    alibi_slopes=alibi_slopes,
-                    block_table=prefill_meta.block_tables,
-                    softcap=logits_soft_cap,
-                    out=prefill_output,
-                    fa_version=self.vllm_flash_attn_version,
-                )
-
-                # flash_attn_varlen_func(  # TODO: need a sparse prefill func
-                #     q=query,
-                #     k=key_cache,
-                #     v=value_cache,
-                #     cu_seqlens_q=prefill_meta.query_start_loc,
-                #     max_seqlen_q=prefill_meta.max_query_len,
-                #     seqused_k=prefill_meta.seq_lens_tensor,
-                #     max_seqlen_k=max_seq_len,
-                #     softmax_scale=softmax_scale,
-                #     causal=True,
-                #     window_size=window_size,
-                #     alibi_slopes=alibi_slopes,
-                #     block_table=prefill_meta.block_tables,
-                #     softcap=logits_soft_cap,
-                #     out=prefill_output,
-                #     fa_version=self.vllm_flash_attn_version,
-                # )
+                if window_size is not None and window_size != (-1, -1):
+                    # SWA, fall back to flash attn
+                    flash_attn_varlen_func(  # noqa
+                        q=query,
+                        k=key_cache,
+                        v=value_cache,
+                        cu_seqlens_q=prefill_meta.query_start_loc,
+                        max_seqlen_q=prefill_meta.max_query_len,
+                        seqused_k=prefill_meta.seq_lens_tensor,
+                        max_seqlen_k=max_seq_len,
+                        softmax_scale=softmax_scale,
+                        causal=True,
+                        window_size=window_size,
+                        alibi_slopes=alibi_slopes,
+                        block_table=prefill_meta.block_tables,
+                        softcap=logits_soft_cap,
+                        out=prefill_output,
+                        fa_version=self.vllm_flash_attn_version,
+                    )
+                else:
+                    # Sparse attn
+                    self._sparse_flash_attn_prefill(
+                        q=query,
+                        k=key_cache,
+                        v=value_cache,
+                        cu_seqlens_q=prefill_meta.query_start_loc,
+                        cu_seqlens_k=prefill_meta.seq_start_loc,
+                        max_seqlen_q=prefill_meta.max_query_len,
+                        max_seqlen_k=max_seq_len,
+                        orig_seq_lens=prefill_meta.orig_seq_len,
+                        softmax_scale=softmax_scale,
+                        causal=True,
+                        window_size=window_size,
+                        alibi_slopes=alibi_slopes,
+                        block_table=prefill_meta.block_tables,
+                        softcap=logits_soft_cap,
+                        out=prefill_output,
+                        fa_version=self.vllm_flash_attn_version,
+                    )
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run. No sparsity during decoding.
@@ -388,8 +397,9 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         max_seqlen_q,
         cu_seqlens_q,
         max_seqlen_k,
+        orig_seq_lens: List[int],  # required to determine if we need sparse attn.
         cu_seqlens_k=None,  # only used for non-paged prefill
-        seqused_k=None,
+        seqused_k=None,  # TODO: Should be able to remove this?
         dropout_p=0.0,
         softmax_scale=None,
         causal=False,
@@ -399,8 +409,8 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         deterministic=False,
         return_attn_probs=False,
         block_table=None,
-        chunk_size: int = 8192,
-        local_size: int = 4096,  # match SWA window
+        chunk_size: int = 8192,  # TODO: Should be handled by ModelRunner / driver_worker?
+        local_size: int = 4096,  # TODO: Same as above. match SWA window?
         *,
         return_softmax_lse=False,
         out=None,
@@ -464,9 +474,9 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         assert (
             cu_seqlens_k is None or seqused_k is None
         ), "cu_seqlens_k and seqused_k cannot be provided at the same time"
-        assert (
-            block_table is None or seqused_k is not None
-        ), "seqused_k must be provided if block_table is provided"
+        # assert (
+        #     block_table is None or seqused_k is not None
+        # ), "seqused_k must be provided if block_table is provided"
         if alibi_slopes is not None:
             raise ValueError("MInference Attention does not support alibi_slopes")
         if not causal:
@@ -491,16 +501,10 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             qe = cu_seqlens_q[i : i + 2][-1]
             ks = cu_seqlens_k[i]
             ke = cu_seqlens_k[i : i + 2][-1]
-
+            current_orig_seq_len = orig_seq_lens[i]
             current_q = q[qs:qe]
             seq_len = len(current_q)
-            if seq_len < self.sparse_threshold:
-                # TODO: Route this seq to dense attn.
-                sparsity_enabled = True
-                continue
-            if (
-                block_table is None
-            ):  # NOTE: For chunked prefill, may have a block_table already populated
+            if block_table is None:
                 current_k = k[ks:ke]
                 current_v = v[ks:ke]
                 current_block_table = None
@@ -508,6 +512,10 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 current_block_table = block_table[i]
                 current_k = k
                 current_v = v
+    
+            if current_orig_seq_len < self.sparse_attention_threshold:
+                raise NotImplementedError("Need to implement a dense attn bypass")
+                # TODO: Route this seq to dense attn. or use conditional branches as per DCA
 
             if current_q.shape[0] == 0:
                 raise RuntimeError("How did this happen :)")  # TODO
@@ -538,19 +546,23 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             )
             for head_id in range(current_q.size(-2)):
                 (
-                    ty,  # TODO: Don't think we need type, remove.
+                    sparsity_type,
                     vertical_size,
                     slash_size,
                     _,
                 ) = self.sparse_attention_config[head_id]
-                assert ty == "vertical_and_slash", "only support slash mode"
+                assert (
+                    sparsity_type == "vertical_and_slash"
+                ), "We only support Vertical and Slash sparsity."
 
                 if vertical_size == 30:
                     vertical_size += 100  # TODO: Bit hacky, should be removed?
                 heads_vertical_size[head_id] = vertical_size
                 heads_slash_size[head_id] = slash_size
 
-            ### BEGIN _dual_chunk_flash_attn_prefill_func logic ###
+            ### BEGIN _dual_chunk_flash_attn_prefill_func logic -> head by head ###
+            # TODO: extract func. 
+            k_length = ke - ks
             flash_results = []
             chunk_len = (
                 chunk_size - local_size
@@ -562,15 +574,20 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             else:
                 block_size = 1
 
-            # TODO: yarn scaling
+            # TODO: yarn scaling -> Need to know original_max_position_embeddings
             # if self.original_max_position_embeddings > 0:
             #     softmax_scale = softmax_scale * scaling_factor
 
-        k_length = ke - ks
-        begin = k_length - q.shape[0]
-        while begin < k_length:
-            flash_per_chunk = []
-            last_q_size = min(qe - qs, self.last_q_size)
+            
+            begin = k_length - q.shape[0]
+            while begin < k_length:
+                # TODO: Need to better understand how block_tables and chunk logic from DCA interface. Do I need chunks here too or can we use the max tokens per batch as an alternative?
+                flash_per_chunk = []
+                last_q_size = min(qe - qs, self.last_q_size)
+                _, num_device_k_heads, head_dim = k_states
+            ### END _dual_chunk_flash_attn_prefill_func logic ###
+            all_outputs.append(current_output)
+    return torch.cat(all_outputs, dim=0)
 
 
 # BEGIN PIOTR WORK

@@ -26,6 +26,7 @@ class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
     FLASH_ATTN_VLLM_V1 = enum.auto()
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
+    MINFERENCE_FLASH_ATTN = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
