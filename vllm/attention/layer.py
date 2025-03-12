@@ -106,13 +106,20 @@ class Attention(nn.Module):
                                         block_size, is_attention_free,
                                         blocksparse_params is not None)
         impl_cls = attn_backend.get_impl_cls()
-        self.impl = impl_cls(
-            num_heads, head_size, scale, num_kv_heads, alibi_slopes,
-            sliding_window, kv_cache_dtype, blocksparse_params,
-            logits_soft_cap, attn_type, **{
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-                "prefix": prefix,
-            } if dual_chunk_attention_config is not None else {})
+        
+        self.dual_chunk_attention_config = extra_impl_args.get("dual_chunk_attention_config", None)
+        if self.dual_chunk_attention_config is not None:
+            extra_impl_args['prefix'] = prefix
+        # TODO: Remove below
+        import os
+        from vllm.attention.backends.flash_attn import FlashAttentionImpl
+        backend = os.environ.get("VLLM_ATTENTION_BACKEND", None)
+        if backend is None:
+            extra_impl_args = {}
+        self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
+                             alibi_slopes, sliding_window, kv_cache_dtype,
+                             blocksparse_params, logits_soft_cap, attn_type,
+                             **extra_impl_args)
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads

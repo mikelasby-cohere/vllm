@@ -267,7 +267,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         if prefill_meta := attn_metadata.prefill_metadata:
             # Profiling run, use normal attn.
             if (
-                kv_cache is None
+                kv_cache.numel() == 0
                 or prefill_meta.block_tables is None
                 or prefill_meta.block_tables.numel() == 0
             ):
@@ -278,6 +278,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 )
                 key = key[:num_prefill_kv_tokens]
                 value = value[:num_prefill_kv_tokens]
+
                 flash_attn_varlen_func(
                     q=query,
                     k=key,
@@ -563,6 +564,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             ### BEGIN _dual_chunk_flash_attn_prefill_func logic -> head by head ###
             # TODO: extract func. 
             k_length = ke - ks
+            block_size = v.shape[1]
             flash_results = []
             chunk_len = (
                 chunk_size - local_size
@@ -578,7 +580,6 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             # if self.original_max_position_embeddings > 0:
             #     softmax_scale = softmax_scale * scaling_factor
 
-            
             begin = k_length - q.shape[0]
             while begin < k_length:
                 # TODO: Need to better understand how block_tables and chunk logic from DCA interface. Do I need chunks here too or can we use the max tokens per batch as an alternative?

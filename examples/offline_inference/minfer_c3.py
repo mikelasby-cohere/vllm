@@ -3,7 +3,7 @@ import os
 from vllm import LLM, SamplingParams
 
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-os.environ["VLLM_ATTENTION_BACKEND"] = "MINFERENCE_FLASH_ATTN"
+# os.environ["VLLM_ATTENTION_BACKEND"] = "MINFERENCE_FLASH_ATTN"
 
 with open(os.path.join(os.path.dirname(__file__), "qwen_1m", "64k.txt")) as f:
     prompt = f.read()
@@ -33,7 +33,7 @@ llm = LLM(
     enforce_eager=True,
     disable_custom_all_reduce=True,
     enable_chunked_prefill=True,
-    max_num_batched_tokens=4096,
+    max_num_batched_tokens=32000,
 )
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
