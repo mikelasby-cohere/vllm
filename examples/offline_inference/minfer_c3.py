@@ -3,20 +3,23 @@ import os
 from vllm import LLM, SamplingParams
 
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-# os.environ["VLLM_ATTENTION_BACKEND"] = "MINFERENCE_FLASH_ATTN"
+os.environ["VLLM_ATTENTION_BACKEND"] = "MINFERENCE_FLASH_ATTN"
 
 with open(os.path.join(os.path.dirname(__file__), "qwen_1m", "64k.txt")) as f:
     prompt = f.read()
 
 MODEL_PATH = "/root/cohere_ckpt/c3-7b-hf/hugging_face/sparse"
+# MODEL_PATH = "/root/cohere_ckpt/c3-7b-hf/hugging_face/poseidon"
 # Sample prompts.
 prompts = [
     prompt,
 ]
 
+# not correct with orig, sparse, or sparse+flash.
+
 # Create a sampling params object.
 sampling_params = SamplingParams(
-    temperature=0.7,
+    temperature=0.,
     top_p=0.8,
     top_k=20,
     repetition_penalty=1.05,
@@ -32,8 +35,9 @@ llm = LLM(
     tensor_parallel_size=1,
     enforce_eager=True,
     disable_custom_all_reduce=True,
-    enable_chunked_prefill=True,
-    max_num_batched_tokens=32000,
+    enable_chunked_prefill=False,
+    # max_num_batched_tokens=4096,
+    # max_num_batched_tokens=2**15,
 )
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects

@@ -240,9 +240,12 @@ def get_sparse_attention_config(
     # Load the sparse attention config.
     with open(config_file) as f:
         config = json.load(f)
+
+    int_key_config = [{int(k):v for k,v in layer_config.items()} for layer_config in config]
+        
     logger.info("Loaded sparse attention config from %s", config_file)
 
-    return config
+    return int_key_config
 
 
 def download_weights_from_hf(

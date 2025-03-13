@@ -1,10 +1,12 @@
 from abc import ABC, abstractmethod
-from turtle import forward
 from typing import Any, Dict, List, Optional, Tuple, Type
 from dataclasses import dataclass
+import math
 
 import torch
+import torch.nn.functional as F
 
+from vllm._custom_ops import convert_vertical_slash_indexes_mergehead, convert_vertical_slash_indexes
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -113,10 +115,10 @@ class MInferenceFlashAttentionInterface(ABC):
 # MInferenceAttention
 
 
-class MInferenceAttentionBackend(FlashAttentionBackend):
+class MInferenceFlashAttentionBackend(FlashAttentionBackend):
     @staticmethod
     def get_name() -> str:
-        return "MInferenceAttention"
+        return "MInferenceFlashAttention"
 
     @staticmethod
     def get_impl_cls() -> Type["MInferenceFlashAttentionImpl"]:
@@ -163,13 +165,16 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             logits_soft_cap,
             attn_type,
         )
-        self.sparse_attention_config = extra_impl_args.get(
-            "sparse_attention_config", None
-        )
+        self.sparse_attention_config = extra_impl_args.get("sparse_attention_config")
         self.sparse_attention_threshold = extra_impl_args.get(
             "sparse_attention_threshold", 0
         )
+        self.layer_idx = extra_impl_args['layer_idx']
         self.last_q_size = extra_impl_args.get("last_q_size", 64)
+        arange = torch.arange(self.last_q_size, device="cuda")
+        self.last_q_mask = (
+            arange[None, None, :, None] >= arange[None, None, None, :]
+        )
         if self.sparse_attention_config is None:
             raise AttributeError("No sparse attention config passed to MInferenceImpl!")
 
@@ -322,6 +327,9 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                     )
                 else:
                     # Sparse attn
+                    orig_seq_len = None
+                    if hasattr(prefill_meta, "orig_seq_len"):
+                        orig_seq_len = prefill_meta.orig_seq_len
                     self._sparse_flash_attn_prefill(
                         q=query,
                         k=key_cache,
@@ -330,7 +338,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                         cu_seqlens_k=prefill_meta.seq_start_loc,
                         max_seqlen_q=prefill_meta.max_query_len,
                         max_seqlen_k=max_seq_len,
-                        orig_seq_lens=prefill_meta.orig_seq_len,
+                        orig_seq_lens=orig_seq_len,
                         softmax_scale=softmax_scale,
                         causal=True,
                         window_size=window_size,
@@ -441,8 +449,8 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
 
         Arguments:
             q: (total_q, nheads, headdim), where total_q = total number of query tokens in the batch.
-            k: (total_k, nheads_k, headdim), where total_k = total number of key tokens in the batch.
-            v: (total_k, nheads_k, headdim), where total_k = total number of key tokens in the batch.
+            k: (num_blocks, page_block_size, nheads_k, headdim) if block_table is not None
+            v: (num_blocks, page_block_size, nheads_v, headdim) if block_table is not None
             cu_seqlens_q: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
             of the sequences in the batch, used to index into q.
             cu_seqlens_k: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
@@ -469,6 +477,8 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
                 normalization factor).
         """
+        if self.layer_idx == 0:
+            print("in first layer")
         assert (
             cu_seqlens_k is not None or seqused_k is not None
         ), "cu_seqlens_k or seqused_k must be provided"
@@ -502,7 +512,9 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             qe = cu_seqlens_q[i : i + 2][-1]
             ks = cu_seqlens_k[i]
             ke = cu_seqlens_k[i : i + 2][-1]
-            current_orig_seq_len = orig_seq_lens[i]
+            current_orig_seq_len = None
+            if orig_seq_lens is not None:
+                current_orig_seq_len = orig_seq_lens[i]
             current_q = q[qs:qe]
             seq_len = len(current_q)
             if block_table is None:
@@ -514,7 +526,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 current_k = k
                 current_v = v
     
-            if current_orig_seq_len < self.sparse_attention_threshold:
+            if current_orig_seq_len is not None and current_orig_seq_len < self.sparse_attention_threshold:
                 raise NotImplementedError("Need to implement a dense attn bypass")
                 # TODO: Route this seq to dense attn. or use conditional branches as per DCA
 
@@ -551,7 +563,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                     vertical_size,
                     slash_size,
                     _,
-                ) = self.sparse_attention_config[head_id]
+                ) = self.sparse_attention_config[self.layer_idx][head_id]
                 assert (
                     sparsity_type == "vertical_and_slash"
                 ), "We only support Vertical and Slash sparsity."
@@ -563,70 +575,265 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
 
             ### BEGIN _dual_chunk_flash_attn_prefill_func logic -> head by head ###
             # TODO: extract func. 
-            k_length = ke - ks
-            block_size = v.shape[1]
-            flash_results = []
-            chunk_len = (
-                chunk_size - local_size
-            )  # TODO: Not sure we need this, I think chunks will simply be processed with cache in subsquent calls to backend
-            if block_table is not None:
-                block_size = v.shape[1]
-                if chunk_len % block_size != 0:
-                    raise ValueError("chunk_len must be divisible by block_size.")
-            else:
-                block_size = 1
-
-            # TODO: yarn scaling -> Need to know original_max_position_embeddings
+            # # TODO: yarn scaling -> Need to know original_max_position_embeddings
             # if self.original_max_position_embeddings > 0:
             #     softmax_scale = softmax_scale * scaling_factor
 
-            begin = k_length - q.shape[0]
-            while begin < k_length:
-                # TODO: Need to better understand how block_tables and chunk logic from DCA interface. Do I need chunks here too or can we use the max tokens per batch as an alternative?
-                flash_per_chunk = []
-                last_q_size = min(qe - qs, self.last_q_size)
-                _, num_device_k_heads, head_dim = k_states
+            if block_table is not None:  # TODO: Raise? Do we ever support the non-paged attn case?
+                block_size = v.shape[1]
+                # if chunk_len % block_size != 0:
+                #     raise ValueError("chunk_len must be divisible by block_size.")
+            else:
+                block_size = 1
+            
+            k_length = ke - ks
+            
+            # Retrieve all key/value chunks from cache
+            block_indicies = _get_block(
+                block_table, block_size, ks, ke)
+            # reshape to (seq_len, num_k_head, headdim)
+            current_k = k[block_indicies].view(-1, *k.shape[-2:])
+            current_v = v[block_indicies].view(-1, *v.shape[-2:])
+
+            # reshape for GQA to (seq_len, num_q_head, headdim)
+            num_device_k_heads, head_dim = current_k.shape[-2:]
+            current_k = (
+                current_k.unsqueeze(2)
+                .repeat(1, 1, group_size, 1)
+                .reshape(-1, num_device_k_heads * group_size, head_dim)
+            )
+            current_v = (
+                current_v.unsqueeze(2)
+                .repeat(1, 1, group_size, 1)
+                .reshape(-1, num_device_k_heads * group_size, head_dim)
+            )
+            
+            # calc approx. atten to determine vertical/slash indicies
+            last_q_size = min(qe - qs, self.last_q_size)
+            # qk will have shape (query_heads, last_q_size, k_length) check last dim
+            qk = (q.transpose(0,1)[:, -last_q_size:] * softmax_scale) @ current_k.permute(1,2,0)
+            # apply attn. scores to -inf for causally masked elements
+            qk[:, :, -last_q_size:] = torch.where(
+                    self.last_q_mask[..., -last_q_size:, -last_q_size:].to(qk.device),
+                    qk[:, :, -last_q_size:],
+                    -torch.inf,
+                )
+            qk = F.softmax(qk, dim=-1, dtype=torch.float32)
+            # get per head attn. score sums across each key index
+            vertical_attn_score_sums = qk.sum(-2, keepdim=True)
+            # heuristic from Qwen1M -> Always keep first 30 keys (prefix)
+            vertical_attn_score_sums[..., :30] = torch.inf
+            vertical_attn_score_sums = vertical_attn_score_sums.squeeze(dim=1)
+            
+            # vertical indices
+            num_query_heads = qk.shape[0]
+            max_slash_topk = torch.max(heads_slash_size).item()
+            max_vertical_topk = torch.max(heads_vertical_size).item()
+            # Handle case where seqlen < max_vertical_topk
+            max_vertical_topk = min(vertical_attn_score_sums.shape[-1], max_vertical_topk)
+            
+            vertical_topk_buffer = torch.topk(
+                vertical_attn_score_sums, max_vertical_topk, -1
+            ).indices
+            slash_topk_buffer = torch.empty(
+                size=(num_query_heads, max_slash_topk), dtype=torch.int64, device=qk.device
+            )
+
+            # Get per head slash scores and max num. slashes based on prompt size
+            for head_i in range(num_query_heads):
+                #  (nqheads=1, lastq, k_len)
+                head_score = qk[head_i : head_i + 1]
+                slash_scores = _sum_all_diagonal_matrix(head_score)
+                if head_score.size(1) != 1:
+                    # drop right up corner -> (1, k_length)
+                    slash_scores = slash_scores[..., : -last_q_size + 1]
+                # heuristic from Qwen1M -> always keep first 100 slash indicies
+                slash_scores[..., -100:] = torch.inf
+
+                head_slash_size = heads_slash_size[head_i]
+                head_slash_size = min(head_slash_size, vertical_attn_score_sums.shape[-1])
+                slash_topk = torch.topk(slash_scores, head_slash_size, -1).indices
+                # （nheads, max_topk）
+                slash_topk_buffer[head_i, :head_slash_size] = slash_topk
+
+                # reset heads topk
+                heads_slash_size[head_i] = head_slash_size
+                heads_vertical_size[head_i] = min(
+                    heads_vertical_size[head_i], max_vertical_topk
+                )
+
+            # TODO: Why initalize to max/min?
+            int32_max = torch.iinfo(torch.int32).max
+            int32_min = torch.iinfo(torch.int32).min
+            vertical_indicies = torch.full(
+                    (num_query_heads, max_vertical_topk),
+                    int32_max,
+                    dtype=torch.int64,
+                    device=q.device,
+                )
+            slash_indicies = torch.full(
+                    (num_query_heads, max_slash_topk),
+                    int32_min,
+                    dtype=torch.int64,
+                    device=q.device,
+                )
+            vertical_indices_count = torch.empty(
+                    size=(num_query_heads,), dtype=torch.int32, device=q.device
+                )
+            slash_indicies_count = torch.empty(
+                    size=(num_query_heads,), dtype=torch.int32, device=q.device
+                )
+
+            # Select vertical/slash indicies per head:
+            for head_i in range(num_query_heads):
+                # Get topk vert. index for this year
+                vertical_topk = vertical_topk_buffer[
+                    head_i, : heads_vertical_size[head_i]
+                ]
+                slash_topk = slash_topk_buffer[
+                    head_i, : heads_slash_size[head_i]
+                ]
+                vertical_indices_count[head_i] = vertical_topk.shape[0]
+                slash_indicies_count[head_i] = slash_topk.shape[0]
+                vertical_indicies[head_i] = vertical_topk
+                slash_indicies[head_i] = slash_topk
+
             ### END _dual_chunk_flash_attn_prefill_func logic ###
-            all_outputs.append(current_output)
-    return torch.cat(all_outputs, dim=0)
+            # Reshape for flash attn
+            if max_seqlen_k is None:
+                max_seqlen_k = current_k.shape[0]
+            q_len, q_heads, h_dim = q.shape
+            q = q.unsqueeze(0).transpose(1,2)
+            current_k = current_k.unsqueeze(0).transpose(1,2)
+            current_v = current_v.unsqueeze(0).transpose(1,2)
+            
+            # flash attn
+            seq_output, _ = _vertical_slash_sparse_attention(
+                q,
+                current_k,
+                current_v,
+                vertical_indicies,
+                slash_indicies,
+                softmax_scale,
+                causal,
+                vertical_indices_count=vertical_indices_count,
+                slash_indices_count=slash_indicies_count
+            )
+            seq_output = seq_output.view(q_heads, q_len, h_dim).transpose(
+                    0, 1
+                )  # (qlen,nhead,h_dim)
+            # No DCA-like merge req'd
+            # s_lse = (
+            #     s_lse.view(q_heads, q_len, 1).squeeze(-1).unsqueeze(0).float()
+            # )  # (1, nhead,qlen)
+            all_outputs.append(seq_output)
+        return torch.cat(all_outputs, dim=0)
 
+def _vertical_slash_sparse_attention(
+    query: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    key: torch.Tensor,  # [BATCH, N_HEADS, N_KV_CTX, D_HEAD]
+    value: torch.Tensor,  # [BATCH, N_HEADS, N_KV_CTX, D_HEAD]
+    v_idx: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
+    s_idx: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
+    softmax_scale: float,
+    causal: bool = True,
+    block_size_M: int = 64,
+    block_size_N: int = 64,
+    vertical_indices_count: torch.Tensor = None,  # [N_HEADS,]
+    slash_indices_count: torch.Tensor = None,
+):
+    batch_size, num_heads, context_size, head_dim = query.shape
+    _, _, kv_seq_len, _ = key.shape
 
-# BEGIN PIOTR WORK
-class VerticalAndSlashAttentionMInference(FlashAttentionImpl):
-    """Combines vertical and diagonal patterns for efficient sparse attention.
+    if head_dim not in [16, 32, 64, 128, 256, 512]:
+        target_dim = 2 ** math.ceil(math.log2(head_dim)) - head_dim
+        query = F.pad(query, [0, target_dim, 0, 0, 0, 0, 0, 0])
+        key = F.pad(key, [0, target_dim, 0, 0, 0, 0, 0, 0])
+        value = F.pad(value, [0, target_dim, 0, 0, 0, 0, 0, 0])
 
-    Implements the Vertical and Slash attention mechanism that selects important tokens based on:
-    1) Vertical patterns - Top-k tokens that receive high attention across all queries
-    2) Diagonal patterns - Diagonal stripes that capture local dependencies
-    """
+    v_idx = (
+        v_idx.to(torch.int32)
+        .reshape((batch_size, num_heads, -1))
+        .sort(dim=-1, descending=False)[0]
+    )
+    s_idx = (
+        s_idx.to(torch.int32)
+        .reshape((batch_size, num_heads, -1))
+        .sort(dim=-1, descending=True)[0]
+    )
+    q_seqlens = torch.tensor([context_size], dtype=torch.int32, device=query.device)
+    kv_seqlens = torch.tensor([kv_seq_len], dtype=torch.int32, device=query.device)
 
-    def __init__(
-        self,
-        vertical_size: int = 64,
-        slash_size: int = 128,
-        approximation_size: int = 64,
-    ):
-        """Initialize Vertical and Slash attention.
-
-        Args:
-            vertical_size (int): Number of vertical tokens to select
-            slash_size (int): Number of diagonal stripes to select
-        """
-        super().__init__()
-        self.vertical_size = vertical_size
-        self.slash_size = slash_size
-        self.approximation_size = approximation_size
-
-    def __call__(
-        self, queries: torch.Tensor, keys: torch.Tensor, values: torch.Tensor
-    ) -> torch.Tensor:
-        attn_output, sparsity = vertical_and_slash_kernel(
-            queries,
-            keys,
-            values,
-            vertical_size=min(self.vertical_size, queries.shape[2]),
-            slash_size=min(self.slash_size, queries.shape[2]),
-            last_q=min(self.approximation_size, queries.shape[2]),
+    if vertical_indices_count is not None and slash_indices_count is not None:
+        (
+            block_count,
+            block_offset,
+            column_count,
+            column_index,
+        ) = convert_vertical_slash_indexes_mergehead(
+            q_seqlens,
+            kv_seqlens,
+            v_idx,
+            s_idx,
+            vertical_indices_count,
+            slash_indices_count,
+            context_size,
+            block_size_M,
+            block_size_N,
+            causal,
         )
-        self.layer_sparsity_statistics.append(sparsity)
-        return attn_output
+    else:
+        (
+            block_count,
+            block_offset,
+            column_count,
+            column_index,
+        ) = convert_vertical_slash_indexes(
+            q_seqlens,
+            kv_seqlens,
+            v_idx,
+            s_idx,
+            context_size,
+            block_size_M,
+            block_size_N,
+            causal,
+        )
+
+    q = query.transpose(1, 2).contiguous()
+    k = key.transpose(1, 2).contiguous()
+    v = value.transpose(1, 2).contiguous()
+    out, lse = sparse_attn_func(
+        q,
+        k,
+        v,
+        block_count,
+        block_offset,
+        column_count,
+        column_index,
+        causal=causal,
+        softmax_scale=softmax_scale,
+        return_softmax_lse=True,
+    )
+    out = out.transpose(1, 2).contiguous()
+    softmax_lse = lse.reshape(*lse.shape, 1)
+    return (out[..., :context_size, :head_dim], softmax_lse[..., :context_size, :])
+
+def _sum_all_diagonal_matrix(mat: torch.tensor):
+    h, n, m = mat.shape
+    # Zero matrix used for padding
+    zero_mat = torch.zeros((h, n, n), device=mat.device)
+    # pads the matrix on left and right
+    mat_padded = torch.cat((zero_mat, mat, zero_mat), -1)
+    # Change the strides
+    mat_strided = mat_padded.as_strided(
+        (1, n, n + m), (n * (2 * n + m), 2 * n + m + 1, 1)
+    )
+    # Sums the resulting matrix's columns
+    sum_diags = torch.sum(mat_strided, 1)
+    return sum_diags[:, 1:]  # drop left bottom corner
+
+
+def _get_block(block_table: torch.Tensor, block_size: int, begin: int, end: int):
+    begin_block = begin // block_size
+    end_block = (end - 1) // block_size + 1
+    return block_table[begin_block:end_block]

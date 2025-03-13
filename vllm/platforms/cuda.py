@@ -169,7 +169,7 @@ class CudaPlatformBase(Platform):
         elif selected_backend == _Backend.MINFERENCE_FLASH_ATTN:
             logger.info("Using MInferenceFlashAttention backend.")
             return ("vllm.attention.backends.minference."
-                    "MInferenceAttentionBackend")
+                    "MInferenceFlashAttentionBackend")
         elif selected_backend == _Backend.FLASH_ATTN:
             pass
         elif selected_backend:

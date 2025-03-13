@@ -62,6 +62,7 @@ class SparseCohereAttention(CohereAttention):
         prefix: str = "",
     ):
         nn.Module.__init__(self)
+        self.layer_idx = int(prefix.split(".")[-2])
         assert hasattr(config, "sparse_attention_config"), \
             "Must provide a sparse_attention_config.json file in model directory!"
         self.sparse_attention_config = config.sparse_attention_config
@@ -138,6 +139,7 @@ class SparseCohereAttention(CohereAttention):
                               prefix=f"{prefix}.attn",
                               ### BEGIN extra_impl_args ###
                               sparse_attention_config = config.sparse_attention_config,
+                              layer_idx=self.layer_idx,
                               # TODO: What about sparse_threshold? Add to hf config
                               ### END extra_impl_args ###
                               )
