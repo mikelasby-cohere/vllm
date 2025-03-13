@@ -26,13 +26,14 @@ sampling_params = SamplingParams(
 # Create an LLM.
 llm = LLM(model=os.path.expanduser("Qwen/Qwen2.5-7B-Instruct-1M"),
           gpu_memory_utilization=0.8,
+        #   max_model_len=1048576,
           max_model_len=512000,
           tensor_parallel_size=1,
           enforce_eager=True,
           disable_custom_all_reduce=True,
           enable_chunked_prefill=True,
-        #   max_num_batched_tokens=131072)
-          max_num_batched_tokens=4096)
+          max_num_batched_tokens=131072)
+        #   max_num_batched_tokens=4096)
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.

@@ -8,7 +8,7 @@ os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 with open(os.path.join(os.path.dirname(__file__), "qwen_1m", "64k.txt")) as f:
     prompt = f.read()
 
-MODEL_PATH = "/root/cohere_ckpt/c3-7b/c3-7b-hf/hugging_face/sparse"
+MODEL_PATH = "/root/cohere_ckpt/c3-7b-hf/hugging_face/sparse"
 # Sample prompts.
 prompts = [
     prompt,
