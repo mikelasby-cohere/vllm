@@ -107,7 +107,7 @@ class Attention(nn.Module):
                                         blocksparse_params is not None)
         impl_cls = attn_backend.get_impl_cls()
         
-        self.dual_chunk_attention_config = extra_impl_args.get("dual_chunk_attention_config", None)
+        self.dual_chunk_attention_config = extra_impl_args.get("dual_chunk_attention_config")
         if self.dual_chunk_attention_config is not None:
             extra_impl_args['prefix'] = prefix
         # TODO: Remove below
@@ -115,7 +115,12 @@ class Attention(nn.Module):
         from vllm.attention.backends.flash_attn import FlashAttentionImpl
         backend = os.environ.get("VLLM_ATTENTION_BACKEND", None)
         if backend is None:
-            extra_impl_args = {}
+            layer_idx = extra_impl_args.get("layer_idx")
+            if layer_idx is None:
+                extra_impl_args = {}
+            else:
+                extra_impl_args = {"layer_idx": layer_idx}
+        # TODO: End of removal
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap, attn_type,

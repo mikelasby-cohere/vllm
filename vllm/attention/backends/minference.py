@@ -111,10 +111,6 @@ class MInferenceFlashAttentionInterface(ABC):
     #     """Compress KV cache after prefilling (default: no compression)"""
     #     return keys, values
 
-
-# MInferenceAttention
-
-
 class MInferenceFlashAttentionBackend(FlashAttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -272,7 +268,8 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         if prefill_meta := attn_metadata.prefill_metadata:
             # Profiling run, use normal attn.
             if (
-                kv_cache.numel() == 0
+                # kv_cache.numel() == 0
+                kv_cache is None
                 or prefill_meta.block_tables is None
                 or prefill_meta.block_tables.numel() == 0
             ):
@@ -307,6 +304,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
                 if window_size is not None and window_size != (-1, -1):
+                    # print(f"{self.layer_idx} going through SWA")
                     # SWA, fall back to flash attn
                     flash_attn_varlen_func(  # noqa
                         q=query,
@@ -328,9 +326,13 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 else:
                     # Sparse attn
                     orig_seq_len = None
+                    if self.layer_idx == 3:
+                        print("sparse flash")
+                    # print(f"{self.layer_idx} going through sparse attn")
                     if hasattr(prefill_meta, "orig_seq_len"):
                         orig_seq_len = prefill_meta.orig_seq_len
                     self._sparse_flash_attn_prefill(
+                    # self._pitor_attn(
                         q=query,
                         k=key_cache,
                         v=value_cache,
@@ -348,6 +350,10 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                         out=prefill_output,
                         fa_version=self.vllm_flash_attn_version,
                     )
+                    # if self.layer_idx == 3:
+                    #     import pickle
+                    #     with open(f"./sparse-out/{self.layer_idx}.pkl", "wb") as handle:
+                    #         pickle.dump(prefill_output, handle)
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run. No sparsity during decoding.
@@ -397,6 +403,36 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                     out=decode_output.unsqueeze(1),
                     fa_version=self.vllm_flash_attn_version,
                 )
+
+    def _pitor_attn(
+        self,
+        q,
+        k,
+        v,
+        max_seqlen_q,
+        cu_seqlens_q,
+        max_seqlen_k,
+        orig_seq_lens: List[int],  # required to determine if we need sparse attn.
+        cu_seqlens_k=None,  # only used for non-paged prefill
+        seqused_k=None,  # TODO: Should be able to remove this?
+        dropout_p=0.0,
+        softmax_scale=None,
+        causal=False,
+        window_size: Optional[List[int]] = None,
+        softcap=0.0,  # 0.0 means deactivated
+        alibi_slopes=None,
+        deterministic=False,
+        return_attn_probs=False,
+        block_table=None,
+        chunk_size: int = 8192,  # TODO: Should be handled by ModelRunner / driver_worker?
+        local_size: int = 4096,  # TODO: Same as above. match SWA window?
+        *,
+        return_softmax_lse=False,
+        out=None,
+        fa_version: int = DEFAULT_FA_VERSION,
+    ):
+        pass
+        
 
     def _sparse_flash_attn_prefill(
         self,
@@ -477,8 +513,8 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
                 normalization factor).
         """
-        if self.layer_idx == 0:
-            print("in first layer")
+        # if self.layer_idx == 3:
+            # print("in first global sparse")
         assert (
             cu_seqlens_k is not None or seqused_k is not None
         ), "cu_seqlens_k or seqused_k must be provided"
@@ -507,6 +543,8 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         all_outputs = []
         # loop through each sequence in the batch to determine critical tokens
         # TODO: extract method
+        if self.layer_idx == 3:
+            print("")
         for i in range(0, len(cu_seqlens_q) - 1):
             qs = cu_seqlens_q[i]
             qe = cu_seqlens_q[i : i + 2][-1]
@@ -514,9 +552,9 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             ke = cu_seqlens_k[i : i + 2][-1]
             current_orig_seq_len = None
             if orig_seq_lens is not None:
+                # TODO: need to propograte from metadata
                 current_orig_seq_len = orig_seq_lens[i]
             current_q = q[qs:qe]
-            seq_len = len(current_q)
             if block_table is None:
                 current_k = k[ks:ke]
                 current_v = v[ks:ke]
@@ -531,8 +569,8 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 # TODO: Route this seq to dense attn. or use conditional branches as per DCA
 
             if current_q.shape[0] == 0:
-                raise RuntimeError("How did this happen :)")  # TODO
-                # continue
+                # raise RuntimeError("How did this happen :)")  # TODO
+                continue
 
             if current_k.shape[0] == 0:
                 all_outputs.append(
@@ -579,7 +617,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             # if self.original_max_position_embeddings > 0:
             #     softmax_scale = softmax_scale * scaling_factor
 
-            if block_table is not None:  # TODO: Raise? Do we ever support the non-paged attn case?
+            if current_block_table is not None:  # TODO: Raise? Do we ever support the non-paged attn case?
                 block_size = v.shape[1]
                 # if chunk_len % block_size != 0:
                 #     raise ValueError("chunk_len must be divisible by block_size.")
@@ -589,8 +627,10 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             k_length = ke - ks
             
             # Retrieve all key/value chunks from cache
-            block_indicies = _get_block(
-                block_table, block_size, ks, ke)
+            if self.layer_idx == 3:
+                print("Hello")
+            block_indicies = _get_block_indicies_from_current_block_table(
+                current_block_table, block_size, ks, ke)
             # reshape to (seq_len, num_k_head, headdim)
             current_k = k[block_indicies].view(-1, *k.shape[-2:])
             current_v = v[block_indicies].view(-1, *v.shape[-2:])
@@ -624,6 +664,15 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             # heuristic from Qwen1M -> Always keep first 30 keys (prefix)
             vertical_attn_score_sums[..., :30] = torch.inf
             vertical_attn_score_sums = vertical_attn_score_sums.squeeze(dim=1)
+            
+            # Compute scaled dot-product attention
+            # last_q = last_q_size
+            # LAST_Q_MASK = self.last_q_mask
+            # inf_value = float("inf")
+            
+            # pitor_qk = torch.einsum('bhmk, bhnk -> bhmn', q[:, :, -last_q:, :], current_k) / softmax_scale
+            # pitor_qk[:, :, :, -last_q:] = torch.where(LAST_Q_MASK[..., -last_q:, -last_q:], pitor_qk[:, :, :, -last_q:], -inf_value)
+            # pitor_qk = torch.nn.functional.softmax(pitor_qk, dim=-1, dtype=torch.float32).to(q.dtype)
             
             # vertical indices
             num_query_heads = qk.shape[0]
@@ -700,6 +749,8 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
 
             ### END _dual_chunk_flash_attn_prefill_func logic ###
             # Reshape for flash attn
+            if self.layer_idx == 3:
+                print("")
             if max_seqlen_k is None:
                 max_seqlen_k = current_k.shape[0]
             q_len, q_heads, h_dim = q.shape
@@ -727,6 +778,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             #     s_lse.view(q_heads, q_len, 1).squeeze(-1).unsqueeze(0).float()
             # )  # (1, nhead,qlen)
             all_outputs.append(seq_output)
+            out[:] = seq_output
         return torch.cat(all_outputs, dim=0)
 
 def _vertical_slash_sparse_attention(
@@ -833,7 +885,7 @@ def _sum_all_diagonal_matrix(mat: torch.tensor):
     return sum_diags[:, 1:]  # drop left bottom corner
 
 
-def _get_block(block_table: torch.Tensor, block_size: int, begin: int, end: int):
+def _get_block_indicies_from_current_block_table(current_block_table: torch.Tensor, block_size: int, begin: int, end: int):
     begin_block = begin // block_size
     end_block = (end - 1) // block_size + 1
-    return block_table[begin_block:end_block]
+    return current_block_table[begin_block:end_block]

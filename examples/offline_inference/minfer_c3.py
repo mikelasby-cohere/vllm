@@ -1,11 +1,12 @@
 import os
 
 from vllm import LLM, SamplingParams
+from transformers import AutoTokenizer
 
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 os.environ["VLLM_ATTENTION_BACKEND"] = "MINFERENCE_FLASH_ATTN"
 
-with open(os.path.join(os.path.dirname(__file__), "qwen_1m", "64k.txt")) as f:
+with open(os.path.join(os.path.dirname(__file__), "qwen_1m", "64k_cohere.txt")) as f:
     prompt = f.read()
 
 MODEL_PATH = "/root/cohere_ckpt/c3-7b-hf/hugging_face/sparse"
@@ -15,7 +16,9 @@ prompts = [
     prompt,
 ]
 
-# not correct with orig, sparse, or sparse+flash.
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+prompts = [{"role": "user", "content": prompt}]
+prompts = tokenizer.apply_chat_template(prompts, add_generation_prompt=True, tokenize=False)
 
 # Create a sampling params object.
 sampling_params = SamplingParams(
@@ -35,8 +38,8 @@ llm = LLM(
     tensor_parallel_size=1,
     enforce_eager=True,
     disable_custom_all_reduce=True,
-    enable_chunked_prefill=False,
-    # max_num_batched_tokens=4096,
+    enable_chunked_prefill=True,
+    max_num_batched_tokens=8192,
     # max_num_batched_tokens=2**15,
 )
 
@@ -45,6 +48,7 @@ llm = LLM(
 outputs = llm.generate(prompts, sampling_params)
 # Print the outputs.
 for output in outputs:
+    print(f"Prompt:\n{prompt}")
     prompt_token_ids = output.prompt_token_ids
     generated_text = output.outputs[0].text
     print(
