@@ -326,8 +326,8 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 else:
                     # Sparse attn
                     orig_seq_len = None
-                    if self.layer_idx == 3:
-                        print("sparse flash")
+                    # if self.layer_idx == 3:
+                    #     print("sparse flash")
                     # print(f"{self.layer_idx} going through sparse attn")
                     if hasattr(prefill_meta, "orig_seq_len"):
                         orig_seq_len = prefill_meta.orig_seq_len
@@ -543,8 +543,11 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         all_outputs = []
         # loop through each sequence in the batch to determine critical tokens
         # TODO: extract method
-        if self.layer_idx == 3:
-            print("")
+        # TODO: Understand better why first call into new seq is usually < max tokens. Shouldn't the last call be this way instead of the first?
+        self.debug_print(f"cu_seqlens_q: {cu_seqlens_q}")
+        if len(cu_seqlens_q)>2:
+            if self.layer_idx == 3:
+                print("hello")
         for i in range(0, len(cu_seqlens_q) - 1):
             qs = cu_seqlens_q[i]
             qe = cu_seqlens_q[i : i + 2][-1]
@@ -554,6 +557,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             if orig_seq_lens is not None:
                 # TODO: need to propograte from metadata
                 current_orig_seq_len = orig_seq_lens[i]
+            self.debug_print(f"qs, qe, q.shape: {qs}, {qe}, {q.shape}")
             current_q = q[qs:qe]
             if block_table is None:
                 current_k = k[ks:ke]
@@ -582,7 +586,6 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 )
                 continue
 
-            current_output = torch.empty_like(current_q)
             group_size = int(
                 current_q.size(-2) / current_k.size(-2)
             )  # num. q heads per k/v head
@@ -627,13 +630,17 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             k_length = ke - ks
             
             # Retrieve all key/value chunks from cache
-            if self.layer_idx == 3:
-                print("Hello")
             block_indicies = _get_block_indicies_from_current_block_table(
                 current_block_table, block_size, ks, ke)
+            self.debug_print(f"block indicies old: {block_indicies}")
+            block_indicies = current_block_table
+            self.debug_print(f"block indicies new: {block_indicies}")
             # reshape to (seq_len, num_k_head, headdim)
-            current_k = k[block_indicies].view(-1, *k.shape[-2:])
-            current_v = v[block_indicies].view(-1, *v.shape[-2:])
+            self.debug_print(f"block_indicies.min: {block_indicies.min()}")
+            self.debug_print(f"block_indicies.max: {block_indicies.max()}")
+            current_k = k[block_indicies].view(-1, *k.shape[-2:])[:k_length]
+            current_v = v[block_indicies].view(-1, *v.shape[-2:])[:k_length]
+            self.debug_print(f"current_k.shape: {current_k.shape}")
 
             # reshape for GQA to (seq_len, num_q_head, headdim)
             num_device_k_heads, head_dim = current_k.shape[-2:]
@@ -651,7 +658,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             # calc approx. atten to determine vertical/slash indicies
             last_q_size = min(qe - qs, self.last_q_size)
             # qk will have shape (query_heads, last_q_size, k_length) check last dim
-            qk = (q.transpose(0,1)[:, -last_q_size:] * softmax_scale) @ current_k.permute(1,2,0)
+            qk = (current_q.transpose(0,1)[:, -last_q_size:] * softmax_scale) @ current_k.permute(1,2,0)
             # apply attn. scores to -inf for causally masked elements
             qk[:, :, -last_q_size:] = torch.where(
                     self.last_q_mask[..., -last_q_size:, -last_q_size:].to(qk.device),
@@ -678,8 +685,10 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             num_query_heads = qk.shape[0]
             max_slash_topk = torch.max(heads_slash_size).item()
             max_vertical_topk = torch.max(heads_vertical_size).item()
-            # Handle case where seqlen < max_vertical_topk
+            # Handle case where num_keys < max_vertical_topk
             max_vertical_topk = min(vertical_attn_score_sums.shape[-1], max_vertical_topk)
+            max_slash_topk = min(vertical_attn_score_sums.shape[-1], max_slash_topk)
+            self.debug_print(f"max_vertical_topk: {max_vertical_topk}")
             
             vertical_topk_buffer = torch.topk(
                 vertical_attn_score_sums, max_vertical_topk, -1
@@ -696,11 +705,11 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 if head_score.size(1) != 1:
                     # drop right up corner -> (1, k_length)
                     slash_scores = slash_scores[..., : -last_q_size + 1]
-                # heuristic from Qwen1M -> always keep first 100 slash indicies
+                # heuristic from Qwen1M -> always keep last 100 slash indicies
                 slash_scores[..., -100:] = torch.inf
 
                 head_slash_size = heads_slash_size[head_i]
-                head_slash_size = min(head_slash_size, vertical_attn_score_sums.shape[-1])
+                head_slash_size = min(head_slash_size, vertical_attn_score_sums.size(-1))
                 slash_topk = torch.topk(slash_scores, head_slash_size, -1).indices
                 # （nheads, max_topk）
                 slash_topk_buffer[head_i, :head_slash_size] = slash_topk
@@ -710,6 +719,9 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 heads_vertical_size[head_i] = min(
                     heads_vertical_size[head_i], max_vertical_topk
                 )
+            # if self.layer_idx == 3:
+            #     print(f"head_slash_size = {head_slash_size}")
+            #     print(f"heads_slash_size[head_i]: {heads_slash_size[head_i]}")
 
             # TODO: Why initalize to max/min?
             int32_max = torch.iinfo(torch.int32).max
@@ -742,6 +754,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 slash_topk = slash_topk_buffer[
                     head_i, : heads_slash_size[head_i]
                 ]
+                
                 vertical_indices_count[head_i] = vertical_topk.shape[0]
                 slash_indicies_count[head_i] = slash_topk.shape[0]
                 vertical_indicies[head_i] = vertical_topk
@@ -749,18 +762,16 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
 
             ### END _dual_chunk_flash_attn_prefill_func logic ###
             # Reshape for flash attn
-            if self.layer_idx == 3:
-                print("")
             if max_seqlen_k is None:
                 max_seqlen_k = current_k.shape[0]
-            q_len, q_heads, h_dim = q.shape
-            q = q.unsqueeze(0).transpose(1,2)
+            q_len, q_heads, h_dim = current_q.shape
+            current_q = current_q.unsqueeze(0).transpose(1,2)
             current_k = current_k.unsqueeze(0).transpose(1,2)
             current_v = current_v.unsqueeze(0).transpose(1,2)
             
             # flash attn
             seq_output, _ = _vertical_slash_sparse_attention(
-                q,
+                current_q,
                 current_k,
                 current_v,
                 vertical_indicies,
@@ -778,8 +789,13 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             #     s_lse.view(q_heads, q_len, 1).squeeze(-1).unsqueeze(0).float()
             # )  # (1, nhead,qlen)
             all_outputs.append(seq_output)
-            out[:] = seq_output
+            out[qs:qe] = seq_output
         return torch.cat(all_outputs, dim=0)
+
+    def debug_print(self, output):
+        return
+        if self.layer_idx == 3:
+            print(output)
 
 def _vertical_slash_sparse_attention(
     query: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]

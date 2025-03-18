@@ -17,8 +17,8 @@ prompts = [
 ]
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-prompts = [{"role": "user", "content": prompt}]
-prompts = tokenizer.apply_chat_template(prompts, add_generation_prompt=True, tokenize=False)
+prompt = [{"role": "user", "content": prompt}]
+prompt = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=False)
 
 # Create a sampling params object.
 sampling_params = SamplingParams(
@@ -45,14 +45,13 @@ llm = LLM(
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
-outputs = llm.generate(prompts, sampling_params)
+outputs = llm.generate([prompt]*2, sampling_params)
 # Print the outputs.
 for output in outputs:
-    print(f"Prompt:\n{prompt}")
+    # print(f"Prompt:\n{prompt}")
     prompt_token_ids = output.prompt_token_ids
     generated_text = output.outputs[0].text
     print(
         f"\n\nPrompt length: {len(prompt_token_ids)}, "
         f"Generated text: {generated_text!r}\n\n"
     )
-    break
