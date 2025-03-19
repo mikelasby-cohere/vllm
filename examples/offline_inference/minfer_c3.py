@@ -38,9 +38,10 @@ llm = LLM(
     tensor_parallel_size=1,
     enforce_eager=True,
     disable_custom_all_reduce=True,
-    enable_chunked_prefill=True,
-    max_num_batched_tokens=8192,
+    enable_chunked_prefill=False,
+    # max_num_batched_tokens=8192,
     # max_num_batched_tokens=2**15,
+    max_num_seqs=1,
 )
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
