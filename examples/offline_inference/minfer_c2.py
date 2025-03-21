@@ -4,7 +4,7 @@ from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-# os.environ["VLLM_ATTENTION_BACKEND"] = "MINFERENCE_FLASH_ATTN"
+os.environ["VLLM_ATTENTION_BACKEND"] = "MINFERENCE_FLASH_ATTN"
 
 with open(os.path.join(os.path.dirname(__file__), "qwen_1m", "20k_cohere.txt")) as f:
     prompt = f.read()

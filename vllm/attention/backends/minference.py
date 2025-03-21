@@ -72,6 +72,8 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             logits_soft_cap,
             attn_type,
         )
+        if not hasattr(self, "vllm_flash_attn_version"):
+            self.vllm_flash_attn_version = 2
         self.sparse_attention_config = extra_impl_args.get("sparse_attention_config")
         self.sparse_attention_threshold = extra_impl_args.get("sparse_attention_threshold", 0)
         self.layer_idx = extra_impl_args["layer_idx"]
@@ -406,9 +408,6 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
 
         all_outputs = []
         # loop through each sequence in the batch to determine critical tokens
-        self.debug_print(f"cu_seqlens_q: {cu_seqlens_q}")
-        if len(cu_seqlens_q) > 2 and self.layer_idx == 3:
-            print("hello")
         for i in range(0, len(cu_seqlens_q) - 1):
             qs = cu_seqlens_q[i]
             qe = cu_seqlens_q[i : i + 2][-1]
@@ -419,7 +418,6 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             if orig_seq_lens is not None:
                 # TODO: need to propograte from metadata, always None for now.
                 current_orig_seq_len = orig_seq_lens[i]
-            self.debug_print(f"qs, qe, q.shape: {qs}, {qe}, {q.shape}")
             current_q = q[qs:qe]
             if block_table.numel() == 0:
                 current_k = k[ks:ke]

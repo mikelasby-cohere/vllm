@@ -43,7 +43,7 @@ class Attention(nn.Module):
         per_layer_sliding_window: Optional[int] = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: Optional[Dict[str, Any]] = None,
+        **extra_impl_args,
     ) -> None:
         super().__init__()
         if per_layer_sliding_window is not None:
@@ -291,8 +291,7 @@ def unified_attention(
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
-    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata,
-                             fp8_out_scale=fp8_out_scale)
+    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
 
 def unified_attention_fake(
