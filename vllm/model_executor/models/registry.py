@@ -96,6 +96,7 @@ _TEXT_GENERATION_MODELS = {
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
+    "SparseCohereForCausalLM": ("sparse_commandr", "SparseCohereForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     # [Encoder-decoder]

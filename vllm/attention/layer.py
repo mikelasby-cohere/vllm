@@ -43,7 +43,7 @@ class Attention(nn.Module):
         per_layer_sliding_window: Optional[int] = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: Optional[Dict[str, Any]] = None,
+        **extra_impl_args,
     ) -> None:
         super().__init__()
         if per_layer_sliding_window is not None:
@@ -106,20 +106,27 @@ class Attention(nn.Module):
                                         block_size, is_attention_free,
                                         blocksparse_params is not None)
         impl_cls = attn_backend.get_impl_cls()
-        self.impl = impl_cls(
-            num_heads, head_size, scale, num_kv_heads, alibi_slopes,
-            sliding_window, kv_cache_dtype, blocksparse_params,
-            logits_soft_cap, attn_type, **{
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-                "prefix": prefix,
-            } if dual_chunk_attention_config is not None else {})
+        
+        self.dual_chunk_attention_config = extra_impl_args.get("dual_chunk_attention_config")
+        if self.dual_chunk_attention_config is not None:
+            extra_impl_args['prefix'] = prefix
+        # TODO: Since attn_backends do not accept kwargs, we need to remove any unused kwargs to switch quickly b/w minference and flash attn. To be removed.
+        import os
+        backend = os.environ.get("VLLM_ATTENTION_BACKEND", None)
+        if backend is None:
+            # it's flash attn in this branch.
+            extra_impl_args = {}
+        # TODO: End of removal
+        self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
+                             alibi_slopes, sliding_window, kv_cache_dtype,
+                             blocksparse_params, logits_soft_cap, attn_type,
+                             **extra_impl_args)
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
@@ -282,6 +289,8 @@ def unified_attention(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
     return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
 

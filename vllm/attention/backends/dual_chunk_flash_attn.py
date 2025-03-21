@@ -392,6 +392,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: DualChunkFlashAttentionMetadata,
+        **kwargs,
     ) -> torch.Tensor:
         """Forward pass with DualChunkFlashAttention.
         Args:
@@ -584,6 +585,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         chunk_size: int = 8192,
         local_size: int = 1024,
     ):
+        """k/v cache are in shape (num_blocks, page_block_size, nheads_k, headdim)"""
         if alibi_slopes is not None:
             raise ValueError("Dual Chunk Attention does not support alibi_slopes")
         if not causal:

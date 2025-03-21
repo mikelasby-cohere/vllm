@@ -656,6 +656,20 @@ class ModelConfig:
                     self.hf_config.dual_chunk_attention_config[
                         "sparse_attention_enabled"] = True
 
+
+    def verify_sparse_attention_config(self, load_config: "LoadConfig") -> None:
+        if hasattr(self.hf_config, "sparse_attention_enabled"):
+            if self.hf_config.sparse_attention_enabled:
+                from vllm.model_executor.model_loader.weight_utils import (
+                    get_sparse_attention_config)
+                sparse_attn_config = get_sparse_attention_config(self, load_config)
+                if len(sparse_attn_config) == 0:
+                    raise AttributeError(
+                        "No sparse config found in model dir but "
+                        "sparse_attention_enabled set to True"
+                    )
+                self.hf_config.sparse_attention_config = sparse_attn_config
+
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
         if not self.use_async_output_proc:
@@ -3160,6 +3174,7 @@ class VllmConfig:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(
                 self.load_config)
+            self.model_config.verify_sparse_attention_config(self.load_config)
 
         if self.cache_config is not None:
             self.cache_config.verify_with_parallel_config(self.parallel_config)
