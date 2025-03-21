@@ -73,6 +73,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("convert_vertical_slash_indexes_mergehead", torch::kCUDA,
            &convert_vertical_slash_indexes_mergehead);
 
+  // COHERE START
+  // Minference OPs
+  // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#func
+  ops.def(
+    "minference_convert_vertical_slash_indexes("
+    "   Tensor seqlens, "
+    "   Tensor vertical_indexes, "
+    "   Tensor slash_indexes, "
+    "   int context_size, "
+    "   int block_size_M, "
+    "   int block_size_N) -> Tensor[]"
+  );
+  ops.impl("minference_convert_vertical_slash_indexes", torch::kCUDA,
+           &minference_convert_vertical_slash_indexes);
+  // COHERE END
+
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");

@@ -110,16 +110,12 @@ class Attention(nn.Module):
         self.dual_chunk_attention_config = extra_impl_args.get("dual_chunk_attention_config")
         if self.dual_chunk_attention_config is not None:
             extra_impl_args['prefix'] = prefix
-        # TODO: Remove below
+        # TODO: Since attn_backends do not accept kwargs, we need to remove any unused kwargs to switch quickly b/w minference and flash attn. To be removed.
         import os
-        from vllm.attention.backends.flash_attn import FlashAttentionImpl
         backend = os.environ.get("VLLM_ATTENTION_BACKEND", None)
         if backend is None:
-            layer_idx = extra_impl_args.get("layer_idx")
-            if layer_idx is None:
-                extra_impl_args = {}
-            else:
-                extra_impl_args = {"layer_idx": layer_idx}
+            # it's flash attn in this branch.
+            extra_impl_args = {}
         # TODO: End of removal
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,

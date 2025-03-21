@@ -34,65 +34,6 @@ from vllm.vllm_flash_attn.flash_attn_interface import (
     DEFAULT_FA_VERSION,
 )
 
-# TODO: Metadata can hold V/S sizes?
-# TODO: Must support pass-through to flash-attn backend when SWA used!
-
-
-class MInferenceFlashAttentionInterface(ABC):
-    """Base class for attention implementations (both prefilling and KV compression)"""
-
-    def __init__(self):
-        self.sparsity_statistics = []
-        self.layer_sparsity_statistics = []
-
-    def reset_sparsity_statistics(self):
-        """Reset the accumulated sparsity statistics."""
-        self.sparsity_statistics = []
-        self.layer_sparsity_statistics = []
-
-    def sync_and_calc_layer_stats(self):
-        layer_sparsity = torch.stack(self.layer_sparsity_statistics).mean(dim=0, keepdim=True)
-
-        if get_tensor_model_parallel_world_size() > 1:
-            layer_sparsity = tensor_model_parallel_all_gather(layer_sparsity)
-
-        self.sparsity_statistics.append(layer_sparsity.mean().item())
-        self.layer_sparsity_statistics = []
-
-    def calculate_sparsity(self) -> float:
-        return sum(self.sparsity_statistics) / len(self.sparsity_statistics)
-
-    @staticmethod
-    def sum_over_diagonals(matrix: torch.Tensor) -> torch.Tensor:
-        """Efficiently sum values along diagonals of the attention matrix.
-
-        This function computes the sum of values along each diagonal of a 4D attention matrix.
-        It uses an efficient strided implementation to avoid explicit diagonal extraction.
-
-        Args:
-            matrix: Input attention matrix of shape (batch_size, num_heads, queries, keys)
-                   where queries and keys are sequence lengths
-
-        Returns:
-            Tensor of shape (batch_size, num_heads, queries + keys - 1) containing the
-            summed values for each diagonal. The diagonals are ordered from top-right
-            to bottom-left, with the main diagonal at index queries-1.
-        """
-        batch_size, num_heads, queries, keys = matrix.shape
-        zero_matrix = torch.zeros((batch_size, num_heads, queries, queries), device=matrix.device)
-        matrix_padded = torch.cat((zero_matrix, matrix, zero_matrix), -1)
-
-        matrix_strided = matrix_padded.as_strided(
-            (batch_size, num_heads, queries, queries + keys),
-            (
-                num_heads * queries * (2 * queries + keys),
-                queries * (2 * queries + keys),
-                2 * queries + keys + 1,
-                1,
-            ),
-        )
-        return torch.sum(matrix_strided, 2)[:, :, 1:]
-
 
 class MInferenceFlashAttentionBackend(FlashAttentionBackend):
     @staticmethod
@@ -102,19 +43,6 @@ class MInferenceFlashAttentionBackend(FlashAttentionBackend):
     @staticmethod
     def get_impl_cls() -> Type["MInferenceFlashAttentionImpl"]:
         return MInferenceFlashAttentionImpl
-
-    # @staticmethod
-    # def get_metadata_cls() -> Type["AttentionMetadata"]:
-    #     return MInferenceAttentionMetadata
-
-    # @staticmethod
-    # def get_builder_cls() -> Type["MInferenceAttentionMetadataBuilder"]:
-    #     return MInferenceAttentionMetadataBuilder
-
-
-# @dataclass
-# class MInferenceAttentionMetadata(FlashAttentionMetadata):
-#     pass
 
 
 class MInferenceFlashAttentionImpl(FlashAttentionImpl):
@@ -164,8 +92,13 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
     ):
+        # TODO: Small fraction (0.002%) of output values are unchanged through the attn op below. Consider overwritting with zeros.
+        # NOTE: Zero init completely removes the unchanged elements. It seems like a coicidence that several elements are re-written with the same value.
+        # output[:] = torch.zeros_like(query)
+
         ## NOTE: START COPIED FROM FlashAttentionImpl.forward ##
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
+
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0, "key/v_scale is not supported in FlashAttention."
 
         assert output is not None, "Output tensor must be provided."
@@ -228,10 +161,9 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         ## NOTE: END COPIED FROM FlashAttentionImpl.forward ##
 
         if prefill_meta := attn_metadata.prefill_metadata:
+            # We deal with prefill sequences in this batch first.
             if kv_cache.numel() == 0 or prefill_meta.block_tables is None or prefill_meta.block_tables.numel() == 0:
-                # start new
-
-                # Standard attn. no kv
+                # Standard attn. no kv cache
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
                 q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = _get_query_key_seq_metadata(prefill_meta, True, attn_type)
@@ -239,6 +171,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                 value = value[:num_prefill_kv_tokens]
 
                 if is_swa:
+                    # We do not support SWA for sparse attn.
                     flash_attn_varlen_func(
                         q=query,
                         k=key,
@@ -277,20 +210,22 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                         out=prefill_output,
                         fa_version=self.vllm_flash_attn_version,
                     )
+                    # TODO: Remove pitor code added here after debuggin completed. 
+                    # NOTE: Current implementation matches exactly (i.e., assertion will pass at the end)
                     # pitor_q = query.unsqueeze(0).reshape(prefill_meta.num_prefills, -1, query.shape[1], query.shape[2]).permute(0, 2, 1, 3)
                     # pitor_k = key.unsqueeze(0).reshape(prefill_meta.num_prefills, -1, key.shape[1], key.shape[2]).permute(0, 2, 1, 3)
                     # pitor_v = value.unsqueeze(0).reshape(prefill_meta.num_prefills, -1, value.shape[1], value.shape[2]).permute(0, 2, 1, 3)
                     # pitor_out, _ = self._pitor_attn(pitor_q, pitor_k, pitor_v, block_table=prefill_meta.block_tables)
-                    # pitor_out = pitor_out.reshape(-1, query.shape[1], query.shape[2])
+                    # pitor_out = pitor_out.view(query.shape[1]*prefill_meta.num_prefills, query.shape[0], query.shape[2]).transpose(0, 1)
                     # prefill_output[prefill_meta.query_start_loc[0]:prefill_meta.query_start_loc[-1]] = pitor_out
                     # assert torch.allclose(prefill_output, pitor_out)
             else:
-                # prefix-enabled attn
+                # prefix-enabled attn, kv_cache populated. 
                 assert attn_type == AttentionType.DECODER, "Only decoder-only models support prefix caching"
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
                 if is_swa:
-                    # prefix enabled flash attn.
+                    # prefix enabled flash attn. for SWA. Note args differ from above.
                     flash_attn_varlen_func(  # noqa
                         q=query,
                         k=key_cache,
@@ -312,6 +247,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                     # prefix enabled sparse attn
                     orig_seq_len = None
                     if hasattr(prefill_meta, "orig_seq_len"):
+                        # TODO: Currently unused but can be used to toggle sparse attn based on min. seq len
                         orig_seq_len = prefill_meta.orig_seq_len
                     self._sparse_flash_attn_prefill(
                         q=query,
@@ -331,6 +267,7 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                         fa_version=self.vllm_flash_attn_version,
                     )
 
+        # From here on we simply use dense attn. for decode. Same as flash attn.
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run. No sparsity during decoding.
             # Use flash_attn_varlen_func kernel for speculative decoding
@@ -378,33 +315,285 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
                     fa_version=self.vllm_flash_attn_version,
                 )
 
+    def _sparse_flash_attn_prefill(
+        self,
+        q,
+        k,
+        v,
+        max_seqlen_q,
+        cu_seqlens_q,
+        orig_seq_lens: List[int],  # required to determine if we need sparse attn.
+        cu_seqlens_k=None,  # only used for non-paged prefill
+        seqused_k=None,  # TODO: Should be able to remove this?
+        dropout_p=0.0,
+        softmax_scale=None,
+        causal=False,
+        window_size: Optional[List[int]] = None,
+        softcap=0.0,  # 0.0 means deactivated
+        alibi_slopes=None,
+        deterministic=False,
+        return_attn_probs=False,
+        block_table=None,
+        *,
+        return_softmax_lse=False,
+        out=None,
+        fa_version: int = DEFAULT_FA_VERSION,
+    ) -> torch.Tensor:
+        """
+        NOTE: Unused args remain for future bypass into Flash Attn. for orig_seq_len < sparsity threshold.
+
+        dropout_p should be set to 0.0 during evaluation
+        Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
+        than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
+        For example, if Q has 6 heads and K, V have 2 heads, head 0, 1, 2 of Q will attention to head
+        0 of K, V, and head 3, 4, 5 of Q will attention to head 1 of K, V.
+
+        If causal=True, the causal mask is aligned to the bottom right corner of the attention matrix.
+        For example, if seqlen_q = 2 and seqlen_k = 5, the causal mask (1 = keep, 0 = masked out) is:
+            1 1 1 1 0
+            1 1 1 1 1
+        If seqlen_q = 5 and seqlen_k = 2, the causal mask is:
+            0 0
+            0 0
+            0 0
+            1 0
+            1 1
+        If the row of the mask is all zero, the output will be zero.
+
+        If window_size != (-1, -1), implements sliding window local attention. Query at position i
+        will only attend to keys between
+        [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
+
+        Arguments:
+            q: (total_q, nheads, headdim), where total_q = total number of query tokens in the batch.
+            k: (num_blocks, page_block_size, nheads_k, headdim) if block_table is not None
+            v: (num_blocks, page_block_size, nheads_v, headdim) if block_table is not None
+            cu_seqlens_q: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
+            of the sequences in the batch, used to index into q.
+            cu_seqlens_k: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
+            of the sequences in the batch, used to index into kv.
+            max_seqlen_q: int. Maximum query sequence length in the batch.
+            max_seqlen_k: int. Maximum key sequence length in the batch.
+            dropout_p: float. Dropout probability.
+            softmax_scale: float. The scaling of QK^T before applying softmax.
+                Default to 1 / sqrt(headdim).
+            causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
+            window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+            softcap: float. Anything > 0 activates softcapping attention.
+            alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
+                (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
+                is added to the attention score of query i and key j.
+            deterministic: bool. Whether to use the deterministic implementation of the backward pass,
+                which is slightly slower and uses more memory. The forward pass is always deterministic.
+            return_attn_probs: bool. Whether to return the attention probabilities. This option is for
+            testing only. The returned probabilities are not guaranteed to be correct
+            (they might not have the right scaling).
+        Return:
+            out: (total, nheads, headdim).
+            softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen). The
+                logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
+                normalization factor).
+        """
+        assert cu_seqlens_k is not None or seqused_k is not None, "cu_seqlens_k or seqused_k must be provided"
+        assert cu_seqlens_k is None or seqused_k is None, "cu_seqlens_k and seqused_k cannot be provided at the same time"
+        if alibi_slopes is not None:
+            raise ValueError("MInference Attention does not support alibi_slopes")
+        if not causal:
+            raise ValueError("MInference Attention does not support causal=False")
+
+        if window_size != (-1, -1) and window_size is not None:
+            raise NotImplementedError("Sparse SWA not implemented!")
+
+        all_outputs = []
+        # loop through each sequence in the batch to determine critical tokens
+        self.debug_print(f"cu_seqlens_q: {cu_seqlens_q}")
+        if len(cu_seqlens_q) > 2 and self.layer_idx == 3:
+            print("hello")
+        for i in range(0, len(cu_seqlens_q) - 1):
+            qs = cu_seqlens_q[i]
+            qe = cu_seqlens_q[i : i + 2][-1]
+            ks = cu_seqlens_k[i]
+            ke = cu_seqlens_k[i : i + 2][-1]
+            k_length = ke - ks
+            current_orig_seq_len = None
+            if orig_seq_lens is not None:
+                # TODO: need to propograte from metadata, always None for now.
+                current_orig_seq_len = orig_seq_lens[i]
+            self.debug_print(f"qs, qe, q.shape: {qs}, {qe}, {q.shape}")
+            current_q = q[qs:qe]
+            if block_table.numel() == 0:
+                current_k = k[ks:ke]
+                current_v = v[ks:ke]
+                current_block_table = None
+            else:
+                current_block_table = block_table[i]
+                current_k = k
+                current_v = v
+
+            if current_orig_seq_len is not None and current_orig_seq_len < self.sparse_attention_threshold:
+                # TODO: Route this seq to dense attn. or use conditional branches as per DCA
+                raise NotImplementedError("Need to implement a dense attn bypass")
+
+            if current_q.shape[0] == 0:
+                continue
+
+            if current_k.shape[0] == 0:
+                all_outputs.append(
+                    torch.zeros(
+                        (current_q.shape[0], current_q.shape[1], v.shape[2]),
+                        device=q.device,
+                        dtype=q.dtype,
+                    )
+                )
+                continue
+
+            group_size = int(current_q.size(-2) / current_k.size(-2))  # num. q heads per k/v head
+            num_device_q_heads = current_q.size(-2)  # NOTE: For TP we may not have all heads on this device
+            heads_vertical_size = torch.empty(size=(num_device_q_heads,), dtype=torch.int32)
+            heads_slash_size = torch.empty(size=(num_device_q_heads,), dtype=torch.int32)
+            for head_id in range(current_q.size(-2)):
+                (
+                    sparsity_type,
+                    vertical_size,
+                    slash_size,
+                    _,
+                ) = self.sparse_attention_config[self.layer_idx][head_id]
+                assert sparsity_type == "vertical_and_slash", "We only support Vertical and Slash sparsity."
+
+                if vertical_size == 30:
+                    # TODO: Parameterize this min. num vert (30->130).
+                    vertical_size += 100
+                heads_vertical_size[head_id] = vertical_size
+                heads_slash_size[head_id] = slash_size
+
+            ### NOTE: BEGIN _dual_chunk_flash_attn_prefill_func logic ###
+            # # TODO: yarn scaling -> Need to know original_max_position_embeddings
+            # if self.original_max_position_embeddings > 0:
+            #     softmax_scale = softmax_scale * scaling_factor
+
+            # If prefix-caching is enabled, retrieve all key/value chunks from cache
+            if current_block_table is not None:
+                # reshape to (seq_len, num_k_head, headdim) and extract only the keys currently populated.
+                # The last block table page may not be completely filled. 
+                current_k = k[current_block_table].view(-1, *k.shape[-2:])[:k_length]
+                current_v = v[current_block_table].view(-1, *v.shape[-2:])[:k_length]
+
+            # reshape for GQA to (seq_len, num_q_head, headdim)
+            num_device_k_heads, head_dim = current_k.shape[-2:]
+            current_k = current_k.unsqueeze(2).repeat(1, 1, group_size, 1).reshape(-1, num_device_k_heads * group_size, head_dim)
+            current_v = current_v.unsqueeze(2).repeat(1, 1, group_size, 1).reshape(-1, num_device_k_heads * group_size, head_dim)
+
+            # calc approx. atten to determine vertical/slash indicies
+            last_q_size = min(qe - qs, self.last_q_size)
+            # qk will have shape (query_heads, last_q_size, k_length)
+            qk = (current_q.transpose(0, 1)[:, -last_q_size:] * softmax_scale) @ current_k.permute(1, 2, 0)
+            # apply attn. scores to -inf for causally masked elements
+            qk[:, :, -last_q_size:] = torch.where(
+                self.last_q_mask[..., -last_q_size:, -last_q_size:].to(qk.device),
+                qk[:, :, -last_q_size:],
+                -torch.inf,
+            )
+            qk = F.softmax(qk, dim=-1, dtype=torch.float32)
+
+            # get per head attn. score sums across each key index
+            vertical_attn_score_sums = qk.sum(-2, keepdim=True)
+            # heuristic from Qwen1M -> Always keep first 30 keys for vertical (prefix)
+            # TODO: Parameterize width of prefix to always keep
+            vertical_attn_score_sums[..., :30] = torch.inf
+            vertical_attn_score_sums = vertical_attn_score_sums.squeeze(dim=1)
+
+            # vertical indices
+            num_query_heads = qk.shape[0]
+            max_slash_topk = torch.max(heads_slash_size).item()
+            max_vertical_topk = torch.max(heads_vertical_size).item()
+            # Handle case where num_keys < max_vertical_topk
+            max_vertical_topk = min(vertical_attn_score_sums.shape[-1], max_vertical_topk)
+            max_slash_topk = min(vertical_attn_score_sums.shape[-1], max_slash_topk)
+
+            vertical_topk_buffer = torch.topk(vertical_attn_score_sums, max_vertical_topk, -1).indices
+            slash_topk_buffer = torch.empty(size=(num_query_heads, max_slash_topk), dtype=torch.int64, device=qk.device)
+
+            # Get per head slash scores and max num. slashes based on prompt size
+            for head_i in range(num_query_heads):
+                #  (nqheads=1, lastq, k_len)
+                head_score = qk[head_i : head_i + 1]
+                slash_scores = _sum_all_diagonal_matrix(head_score)
+                if head_score.size(1) != 1:
+                    # drop right up corner -> (1, k_length)
+                    slash_scores = slash_scores[..., : -last_q_size + 1]
+                # heuristic from Qwen1M -> always keep last 100 slash indicies
+                # TODO: Parameterize last slash scores to always keep.
+                slash_scores[..., -100:] = torch.inf
+
+                head_slash_size = heads_slash_size[head_i]
+                head_slash_size = min(head_slash_size, vertical_attn_score_sums.size(-1))
+                slash_topk = torch.topk(slash_scores, head_slash_size, -1).indices
+                # （nheads, max_topk）
+                slash_topk_buffer[head_i, :head_slash_size] = slash_topk
+
+                # reset heads topk
+                heads_slash_size[head_i] = head_slash_size
+                heads_vertical_size[head_i] = min(heads_vertical_size[head_i], max_vertical_topk)
+
+            int32_max = torch.iinfo(torch.int32).max
+            int32_min = torch.iinfo(torch.int32).min
+            vertical_indicies = torch.full(
+                (num_query_heads, max_vertical_topk),
+                int32_max,
+                dtype=torch.int64,
+                device=q.device,
+            )
+            slash_indicies = torch.full(
+                (num_query_heads, max_slash_topk),
+                int32_min,
+                dtype=torch.int64,
+                device=q.device,
+            )
+            vertical_indices_count = torch.empty(size=(num_query_heads,), dtype=torch.int32, device=q.device)
+            slash_indices_count = torch.empty(size=(num_query_heads,), dtype=torch.int32, device=q.device)
+
+            # Select vertical/slash indicies per head:
+            for head_i in range(num_query_heads):
+                # Get topk indices for each head and assign to buffers
+                vertical_topk = vertical_topk_buffer[head_i, : heads_vertical_size[head_i]]
+                slash_topk = slash_topk_buffer[head_i, : heads_slash_size[head_i]]
+
+                vertical_indices_count[head_i] = vertical_topk.shape[0]
+                slash_indices_count[head_i] = slash_topk.shape[0]
+                vertical_indicies[head_i] = vertical_topk
+                slash_indicies[head_i] = slash_topk
+
+            ### NOTE: END _dual_chunk_flash_attn_prefill_func logic ###
+
+            # Reshape for flash attn
+            q_len, q_heads, h_dim = current_q.shape
+            current_q = current_q.unsqueeze(0).transpose(1, 2)
+            current_k = current_k.unsqueeze(0).transpose(1, 2)
+            current_v = current_v.unsqueeze(0).transpose(1, 2)
+
+            seq_output, _ = _vertical_slash_sparse_attention(
+                current_q,
+                current_k,
+                current_v,
+                vertical_indicies,
+                slash_indicies,
+                softmax_scale,
+                causal,
+                vertical_indices_count=vertical_indices_count,
+                slash_indices_count=slash_indices_count,
+            )
+            seq_output = seq_output.view(q_heads, q_len, h_dim).transpose(0, 1)  # (qlen,nhead,h_dim)
+            out[qs:qe] = seq_output
+        return out
+
+    # TODO: Remove pitor code here once satisfied that above implementation matches
+    # NOTE: _pitor_attn as implmeneted here does not support chunked prefill, prefix-enabled cache or batched attn without padding.
     def _pitor_attn(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         block_table: Optional[torch.Tensor] = None,
-        # max_seqlen_q,
-        # cu_seqlens_q,
-        # max_seqlen_k,
-        # orig_seq_lens: List[int],  # required to determine if we need sparse attn.
-        # cu_seqlens_k=None,  # only used for non-paged prefill
-        # seqused_k=None,  # TODO: Should be able to remove this?
-        # dropout_p=0.0,
-        # softmax_scale=None,
-        # causal=False,
-        # window_size: Optional[List[int]] = None,
-        # softcap=0.0,  # 0.0 means deactivated
-        # alibi_slopes=None,
-        # deterministic=False,
-        # return_attn_probs=False,
-        # block_table=None,
-        # chunk_size: int = 8192,  # TODO: Should be handled by ModelRunner / driver_worker?
-        # local_size: int = 4096,  # TODO: Same as above. match SWA window?
-        # *,
-        # return_softmax_lse=False,
-        # out=None,
-        # fa_version: int = DEFAULT_FA_VERSION,
     ):
         def _triton_mixed_sparse_attention(
             q: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
@@ -494,28 +683,15 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
             s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
             seqlens = torch.tensor([context_size], dtype=torch.int32, device=query.device)
             sm_scale = head_dim**-0.5
-            # pitor code, use our vLLM registered op instead
-            # block_count, block_offset, column_count, column_index = convert_vertical_slash_indexes(
-            #     seqlens, v_idx, s_idx, context_size, block_size_M, block_size_N,
-            # )
-            batch_size, num_heads, context_size, head_dim = query.shape
-            (
-                block_count,
-                block_offset,
-                column_count,
-                column_index,
-            ) = convert_vertical_slash_indexes_mergehead(
-                q_seqlens,
-                kv_seqlens,
+            block_count, block_offset, column_count, column_index = torch.ops._C.minference_convert_vertical_slash_indexes(
+                seqlens,
                 v_idx,
                 s_idx,
-                vertical_indices_count,
-                slash_indices_count,
                 context_size,
                 block_size_M,
                 block_size_N,
-                causal,
             )
+            # batch_size, num_heads, context_size, head_dim = query.shape
             # sparsity = calc_sparsity(block_count, column_count, context_size)
             out = _triton_mixed_sparse_attention(
                 query,
@@ -572,8 +748,10 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         # GQA fix
         group_size = q.shape[1] // k.shape[1]
         bs, num_device_k_heads, seq_len, head_dim = k.shape
-        k = k.unsqueeze(1).repeat(1, group_size, 1, 1, 1).reshape(bs, num_device_k_heads * group_size, seq_len, head_dim)
-        v = v.unsqueeze(1).repeat(1, group_size, 1, 1, 1).reshape(bs, num_device_k_heads * group_size, seq_len, head_dim)
+        if self.layer_idx == 3:
+            print("pitor breakpoint")
+        k = k.unsqueeze(2).repeat(1, 1, group_size, 1, 1).reshape(bs, num_device_k_heads * group_size, seq_len, head_dim)
+        v = v.unsqueeze(2).repeat(1, 1, group_size, 1, 1).reshape(bs, num_device_k_heads * group_size, seq_len, head_dim)
         # END GQA fix
 
         # Compute scaled dot-product attention
@@ -592,298 +770,21 @@ class MInferenceFlashAttentionImpl(FlashAttentionImpl):
         # # Compute top slashes
         slash = sum_over_diagonals(qk)[..., : -last_q + 1]
         slash[..., -topk_slash_inf:] = inf_value
+
+        # Qwen-1m backend
+        # NOTE: Slash index calculated differently compared to Pitor's codebase
+        # slash = torch.topk(slash, slash_size, -1).indices
+        # sm_scale = head_dim**-0.5
+        # vertical_indices_count = torch.tensor([vertical_size] * q.shape[1], dtype=torch.int32, device=q.device)
+        # slash_indices_count = torch.tensor([slash_size] * q.shape[1], dtype=torch.int32, device=q.device)
+        # global vs_args
+        # return _vertical_slash_sparse_attention(
+        #     q, k, v, vertical_topk, slash, sm_scale, causal=True, vertical_indices_count=vertical_indices_count, slash_indices_count=slash_indices_count
+        # )
+
+        # pitor backend -> same result as above
         slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
-
-        sm_scale = head_dim**-0.5
-        vertical_indices_count = torch.tensor([vertical_size] * q.shape[1], dtype=torch.int32, device=q.device)
-        slash_indices_count = torch.tensor([slash_size] * q.shape[1], dtype=torch.int32, device=q.device)
-        return _vertical_slash_sparse_attention(
-            q, k, v, vertical_topk, slash, sm_scale, causal=True, vertical_indices_count=vertical_indices_count, slash_indices_count=slash_indices_count
-        )
-        # return vertical_slash_sparse_attention(q, k, v, vertical_topk, slash)
-
-    def _sparse_flash_attn_prefill(
-        self,
-        q,
-        k,
-        v,
-        max_seqlen_q,
-        cu_seqlens_q,
-        orig_seq_lens: List[int],  # required to determine if we need sparse attn.
-        cu_seqlens_k=None,  # only used for non-paged prefill
-        seqused_k=None,  # TODO: Should be able to remove this?
-        dropout_p=0.0,
-        softmax_scale=None,
-        causal=False,
-        window_size: Optional[List[int]] = None,
-        softcap=0.0,  # 0.0 means deactivated
-        alibi_slopes=None,
-        deterministic=False,
-        return_attn_probs=False,
-        block_table=None,
-        *,
-        return_softmax_lse=False,
-        out=None,
-        fa_version: int = DEFAULT_FA_VERSION,
-    ) -> torch.Tensor:
-        """dropout_p should be set to 0.0 during evaluation
-        Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
-        than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
-        For example, if Q has 6 heads and K, V have 2 heads, head 0, 1, 2 of Q will attention to head
-        0 of K, V, and head 3, 4, 5 of Q will attention to head 1 of K, V.
-
-        If causal=True, the causal mask is aligned to the bottom right corner of the attention matrix.
-        For example, if seqlen_q = 2 and seqlen_k = 5, the causal mask (1 = keep, 0 = masked out) is:
-            1 1 1 1 0
-            1 1 1 1 1
-        If seqlen_q = 5 and seqlen_k = 2, the causal mask is:
-            0 0
-            0 0
-            0 0
-            1 0
-            1 1
-        If the row of the mask is all zero, the output will be zero.
-
-        If window_size != (-1, -1), implements sliding window local attention. Query at position i
-        will only attend to keys between
-        [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
-
-        Arguments:
-            q: (total_q, nheads, headdim), where total_q = total number of query tokens in the batch.
-            k: (num_blocks, page_block_size, nheads_k, headdim) if block_table is not None
-            v: (num_blocks, page_block_size, nheads_v, headdim) if block_table is not None
-            cu_seqlens_q: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
-            of the sequences in the batch, used to index into q.
-            cu_seqlens_k: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
-            of the sequences in the batch, used to index into kv.
-            max_seqlen_q: int. Maximum query sequence length in the batch.
-            max_seqlen_k: int. Maximum key sequence length in the batch.
-            dropout_p: float. Dropout probability.
-            softmax_scale: float. The scaling of QK^T before applying softmax.
-                Default to 1 / sqrt(headdim).
-            causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-            window_size: (left, right). If not (-1, -1), implements sliding window local attention.
-            softcap: float. Anything > 0 activates softcapping attention.
-            alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
-                (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
-                is added to the attention score of query i and key j.
-            deterministic: bool. Whether to use the deterministic implementation of the backward pass,
-                which is slightly slower and uses more memory. The forward pass is always deterministic.
-            return_attn_probs: bool. Whether to return the attention probabilities. This option is for
-            testing only. The returned probabilities are not guaranteed to be correct
-            (they might not have the right scaling).
-        Return:
-            out: (total, nheads, headdim).
-            softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen). The
-                logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
-                normalization factor).
-        """
-        assert cu_seqlens_k is not None or seqused_k is not None, "cu_seqlens_k or seqused_k must be provided"
-        assert cu_seqlens_k is None or seqused_k is None, "cu_seqlens_k and seqused_k cannot be provided at the same time"
-        if alibi_slopes is not None:
-            raise ValueError("MInference Attention does not support alibi_slopes")
-        if not causal:
-            raise ValueError("MInference Attention does not support causal=False")
-
-        # custom op does not support non-tuple input
-        real_window_size: Tuple[int, int]
-        if window_size != (-1, -1) and window_size is not None:  # TODO: Support Sparse + SWA?
-            raise NotImplementedError("Sparse SWA not implemented!")
-            assert len(window_size) == 2
-            real_window_size = (window_size[0], window_size[1])
-        else:
-            real_window_size = (-1, -1)
-
-        all_outputs = []
-        # loop through each sequence in the batch to determine critical tokens
-        # TODO: extract method
-        self.debug_print(f"cu_seqlens_q: {cu_seqlens_q}")
-        if len(cu_seqlens_q) > 2 and self.layer_idx == 3:
-            print("hello")
-        for i in range(0, len(cu_seqlens_q) - 1):
-            qs = cu_seqlens_q[i]
-            qe = cu_seqlens_q[i : i + 2][-1]
-            ks = cu_seqlens_k[i]
-            ke = cu_seqlens_k[i : i + 2][-1]
-            k_length = ke - ks
-            current_orig_seq_len = None
-            if orig_seq_lens is not None:
-                # TODO: need to propograte from metadata
-                current_orig_seq_len = orig_seq_lens[i]
-            self.debug_print(f"qs, qe, q.shape: {qs}, {qe}, {q.shape}")
-            current_q = q[qs:qe]
-            if block_table.numel() == 0:
-                current_k = k[ks:ke]
-                current_v = v[ks:ke]
-                current_block_table = None
-            else:
-                current_block_table = block_table[i]
-                current_k = k
-                current_v = v
-
-            if current_orig_seq_len is not None and current_orig_seq_len < self.sparse_attention_threshold:
-                raise NotImplementedError("Need to implement a dense attn bypass")
-                # TODO: Route this seq to dense attn. or use conditional branches as per DCA
-
-            if current_q.shape[0] == 0:
-                # raise RuntimeError("How did this happen :)")  # TODO
-                continue
-
-            if current_k.shape[0] == 0:
-                all_outputs.append(
-                    torch.zeros(
-                        (current_q.shape[0], current_q.shape[1], v.shape[2]),
-                        device=q.device,
-                        dtype=q.dtype,
-                    )
-                )
-                continue
-
-            group_size = int(current_q.size(-2) / current_k.size(-2))  # num. q heads per k/v head
-            num_device_q_heads = current_q.size(-2)  # NOTE: For TP we may not have all heads on this device
-            heads_vertical_size = torch.empty(size=(num_device_q_heads,), dtype=torch.int32)
-            heads_slash_size = torch.empty(size=(num_device_q_heads,), dtype=torch.int32)
-            for head_id in range(current_q.size(-2)):
-                (
-                    sparsity_type,
-                    vertical_size,
-                    slash_size,
-                    _,
-                ) = self.sparse_attention_config[self.layer_idx][head_id]
-                assert sparsity_type == "vertical_and_slash", "We only support Vertical and Slash sparsity."
-
-                if vertical_size == 30:
-                    vertical_size += 100  # TODO: Bit hacky, should be removed?
-                heads_vertical_size[head_id] = vertical_size
-                heads_slash_size[head_id] = slash_size
-
-            ### NOTE: BEGIN _dual_chunk_flash_attn_prefill_func logic ###
-            # TODO: extract func.
-            # # TODO: yarn scaling -> Need to know original_max_position_embeddings
-            # if self.original_max_position_embeddings > 0:
-            #     softmax_scale = softmax_scale * scaling_factor
-
-            # If prefix-caching is enabled, retrieve all key/value chunks from cache
-            if current_block_table is not None:
-                # reshape to (seq_len, num_k_head, headdim)
-                self.debug_print(f"current_block_table.min: {current_block_table.min()}")
-                self.debug_print(f"current_block_table.max: {current_block_table.max()}")
-                current_k = k[current_block_table].view(-1, *k.shape[-2:])[:k_length]
-                current_v = v[current_block_table].view(-1, *v.shape[-2:])[:k_length]
-                self.debug_print(f"current_k.shape: {current_k.shape}")
-
-            # reshape for GQA to (seq_len, num_q_head, headdim)
-            num_device_k_heads, head_dim = current_k.shape[-2:]
-            current_k = current_k.unsqueeze(2).repeat(1, 1, group_size, 1).reshape(-1, num_device_k_heads * group_size, head_dim)
-            current_v = current_v.unsqueeze(2).repeat(1, 1, group_size, 1).reshape(-1, num_device_k_heads * group_size, head_dim)
-
-            # calc approx. atten to determine vertical/slash indicies
-            last_q_size = min(qe - qs, self.last_q_size)
-            # qk will have shape (query_heads, last_q_size, k_length) check last dim
-            qk = (current_q.transpose(0, 1)[:, -last_q_size:] * softmax_scale) @ current_k.permute(1, 2, 0)
-            # apply attn. scores to -inf for causally masked elements
-            qk[:, :, -last_q_size:] = torch.where(
-                self.last_q_mask[..., -last_q_size:, -last_q_size:].to(qk.device),
-                qk[:, :, -last_q_size:],
-                -torch.inf,
-            )
-            qk = F.softmax(qk, dim=-1, dtype=torch.float32)
-            # get per head attn. score sums across each key index
-            vertical_attn_score_sums = qk.sum(-2, keepdim=True)
-            # heuristic from Qwen1M -> Always keep first 30 keys (prefix)
-            vertical_attn_score_sums[..., :30] = torch.inf
-            vertical_attn_score_sums = vertical_attn_score_sums.squeeze(dim=1)
-
-            # vertical indices
-            num_query_heads = qk.shape[0]
-            max_slash_topk = torch.max(heads_slash_size).item()
-            max_vertical_topk = torch.max(heads_vertical_size).item()
-            # Handle case where num_keys < max_vertical_topk
-            max_vertical_topk = min(vertical_attn_score_sums.shape[-1], max_vertical_topk)
-            max_slash_topk = min(vertical_attn_score_sums.shape[-1], max_slash_topk)
-            self.debug_print(f"max_vertical_topk: {max_vertical_topk}")
-
-            vertical_topk_buffer = torch.topk(vertical_attn_score_sums, max_vertical_topk, -1).indices
-            slash_topk_buffer = torch.empty(size=(num_query_heads, max_slash_topk), dtype=torch.int64, device=qk.device)
-
-            # Get per head slash scores and max num. slashes based on prompt size
-            for head_i in range(num_query_heads):
-                #  (nqheads=1, lastq, k_len)
-                head_score = qk[head_i : head_i + 1]
-                slash_scores = _sum_all_diagonal_matrix(head_score)
-                if head_score.size(1) != 1:
-                    # drop right up corner -> (1, k_length)
-                    slash_scores = slash_scores[..., : -last_q_size + 1]
-                # heuristic from Qwen1M -> always keep last 100 slash indicies
-                slash_scores[..., -100:] = torch.inf
-
-                head_slash_size = heads_slash_size[head_i]
-                head_slash_size = min(head_slash_size, vertical_attn_score_sums.size(-1))
-                slash_topk = torch.topk(slash_scores, head_slash_size, -1).indices
-                # （nheads, max_topk）
-                slash_topk_buffer[head_i, :head_slash_size] = slash_topk
-
-                # reset heads topk
-                heads_slash_size[head_i] = head_slash_size
-                heads_vertical_size[head_i] = min(heads_vertical_size[head_i], max_vertical_topk)
-            # if self.layer_idx == 3:
-            #     print(f"head_slash_size = {head_slash_size}")
-            #     print(f"heads_slash_size[head_i]: {heads_slash_size[head_i]}")
-
-            int32_max = torch.iinfo(torch.int32).max
-            int32_min = torch.iinfo(torch.int32).min
-            vertical_indicies = torch.full(
-                (num_query_heads, max_vertical_topk),
-                int32_max,
-                dtype=torch.int64,
-                device=q.device,
-            )
-            slash_indicies = torch.full(
-                (num_query_heads, max_slash_topk),
-                int32_min,
-                dtype=torch.int64,
-                device=q.device,
-            )
-            vertical_indices_count = torch.empty(size=(num_query_heads,), dtype=torch.int32, device=q.device)
-            slash_indicies_count = torch.empty(size=(num_query_heads,), dtype=torch.int32, device=q.device)
-
-            # Select vertical/slash indicies per head:
-            for head_i in range(num_query_heads):
-                # Get topk vert. index for this year
-                vertical_topk = vertical_topk_buffer[head_i, : heads_vertical_size[head_i]]
-                slash_topk = slash_topk_buffer[head_i, : heads_slash_size[head_i]]
-
-                vertical_indices_count[head_i] = vertical_topk.shape[0]
-                slash_indicies_count[head_i] = slash_topk.shape[0]
-                vertical_indicies[head_i] = vertical_topk
-                slash_indicies[head_i] = slash_topk
-
-            ### NOTE: END _dual_chunk_flash_attn_prefill_func logic ###
-            # Reshape for flash attn
-            q_len, q_heads, h_dim = current_q.shape
-            current_q = current_q.unsqueeze(0).transpose(1, 2)
-            current_k = current_k.unsqueeze(0).transpose(1, 2)
-            current_v = current_v.unsqueeze(0).transpose(1, 2)
-
-            # flash attn
-            seq_output, _ = _vertical_slash_sparse_attention(
-                current_q,
-                current_k,
-                current_v,
-                vertical_indicies,
-                slash_indicies,
-                softmax_scale,
-                causal,
-                vertical_indices_count=vertical_indices_count,
-                slash_indices_count=slash_indicies_count,
-            )
-            out[qs:qe] = seq_output.view(q_heads, q_len, h_dim).transpose(0, 1)  # (qlen,nhead,h_dim)
-        return out
-
-    def debug_print(self, output):
-        return
-        if self.layer_idx == 3:
-            print(output)
+        return vertical_slash_sparse_attention(q, k, v, vertical_topk, slash)
 
 
 def _vertical_slash_sparse_attention(
@@ -981,9 +882,7 @@ def _sum_all_diagonal_matrix(mat: torch.tensor):
     return sum_diags[:, 1:]  # drop left bottom corner
 
 
-# pitor triton
-
-
+# TODO: pitor triton -> To be removed
 @triton.jit
 def _triton_mixed_sparse_attn_fwd_kernel(
     Q,

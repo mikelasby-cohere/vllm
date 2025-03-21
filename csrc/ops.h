@@ -77,6 +77,17 @@ void convert_vertical_slash_indexes_mergehead(
     torch::Tensor slash_indices_count, int64_t context_size,
     int64_t block_size_M, int64_t block_size_N, bool causal);
 
+// COHERE START
+std::vector<at::Tensor> minference_convert_vertical_slash_indexes(
+    torch::Tensor seqlens,           // [BATCH, ]
+    torch::Tensor vertical_indexes,  // [BATCH, N_HEADS, NNZ_V]
+    torch::Tensor slash_indexes,     // [BATCH, N_HEADS, NNZ_S]
+    int64_t context_size,
+    int64_t block_size_M,
+    int64_t block_size_N
+);
+// COHERE END
+
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
 
